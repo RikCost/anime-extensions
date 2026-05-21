@@ -18,7 +18,6 @@ import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.bodyString
@@ -27,6 +26,10 @@ import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -54,7 +57,10 @@ class Animelib :
 
     private val apiSite = "https://hapi.hentaicdn.org"
     private val apiUrl = "$apiSite/api"
-    private val coverDomain = "cover.imglib.info"
+
+    // Some deployments use different cover hosts — include both common ones
+    private val coverDomains = listOf("cover.hentaicdn.org", "cover.imglib.info")
+    private val defaultCoverDomain = coverDomains[0]
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
     private val dateFormatter by lazy { SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH) }
@@ -87,15 +93,31 @@ class Animelib :
     override val client = network.client.newBuilder()
         .addInterceptor { chain ->
             val request = chain.request()
-            val requestToProceed = if (request.url.host == coverDomain) {
-                request.newBuilder()
-                    .header("Referer", "https://$domain/")
-                    .build()
-            } else {
-                request
+            val host = request.url.host
+            val builder = request.newBuilder()
+
+            // Add Referer/Origin for cover and API hosts
+            if (host in coverDomains || host == apiSite.toHttpUrl().host) {
+                builder.header("Referer", "https://$domain/")
+                builder.header("Origin", "https://$domain")
             }
 
-            chain.proceed(requestToProceed)
+            // Additional headers for API requests to bypass simple bot protections
+            if (host == apiSite.toHttpUrl().host) {
+                builder.header("Accept", "application/json, text/plain, */*")
+                builder.header("X-Requested-With", "XMLHttpRequest")
+                builder.header("User-Agent", "Mozilla/5.0 (Android)")
+            }
+
+            val requestToProceed = builder.build()
+            val response = chain.proceed(requestToProceed)
+
+            // Log 403 responses for easier debugging
+            if (response.code == 403) {
+                android.util.Log.w("Animelib", "HTTP 403 for ${request.url} (host=$host)")
+            }
+
+            response
         }.build()
 
     // =============================== Preference ===============================
@@ -352,17 +374,21 @@ class Animelib :
             .parseAs<VideoServerData>()
 
         val serverPreference = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_ENTRIES[0])
-        if (serverPreference.isNullOrEmpty()) {
-            return videoServers.data.videoServers[0].url
-        }
-
-        for (videoServer in videoServers.data.videoServers) {
-            if (videoServer.label == serverPreference) {
-                return videoServer.url
+        val chosen = if (serverPreference.isNullOrEmpty()) {
+            videoServers.data.videoServers[0].url
+        } else {
+            var found: String? = null
+            for (videoServer in videoServers.data.videoServers) {
+                if (videoServer.label == serverPreference) {
+                    found = videoServer.url
+                    break
+                }
             }
+            found ?: videoServers.data.videoServers[0].url
         }
 
-        return videoServers.data.videoServers[0].url
+        android.util.Log.d("Animelib", "fetchPreferredVideoServer: chosen=$chosen preference=$serverPreference servers=${videoServers.data.videoServers}")
+        return chosen
     }
 
     private suspend fun kodikVideoLinks(playerUrl: String?, teamName: String): List<Video> {
@@ -402,7 +428,18 @@ class Animelib :
         formBody.add("id", urlParts[4])
         formBody.add("hash", urlParts[5])
 
-        val videoInfoRequest = POST("https://$kodikDomain/ftor", body = formBody.build())
+        val videoInfoRequest = Request.Builder()
+            .url("https://$kodikDomain/ftor")
+            .post(formBody.build())
+            .headers(
+                Headers.Builder().apply {
+                    set("Referer", "$baseUrl/")
+                    set("Origin", "https://$domain")
+                    set("User-Agent", "Mozilla/5.0 (Android)")
+                }.build(),
+            )
+            .build()
+
         val kodikData = client.newCall(videoInfoRequest).awaitSuccess().parseAs<KodikData>()
 
         // Load js with encode algorithm and parse it
@@ -459,8 +496,19 @@ class Animelib :
 
             val hlsUrl = Base64.decode(base64Url, Base64.DEFAULT).toString(Charsets.UTF_8)
             val playlistUrl = UrlUtils.fixUrl(hlsUrl) ?: return@flatMap emptyList()
+
+            // Use explicit headers for Kodik HLS requests to avoid 403s
+            val kodikHeaders = Headers.Builder().apply {
+                set("Accept", "*/*")
+                set("Referer", "$baseUrl/")
+                set("Origin", "https://$domain")
+                set("User-Agent", "Mozilla/5.0 (Android)")
+            }.build()
+
             playlistUtils.extractFromHls(
                 playlistUrl,
+                masterHeaders = kodikHeaders,
+                videoHeaders = kodikHeaders,
                 videoNameGen = { "$teamName (${quality}p Kodik)" },
             )
         }
@@ -495,9 +543,32 @@ class Animelib :
                 }
             }
 
-            val url = "$serverUrl${it.href}"
+            // Build absolute URL for the video; `href` may be absolute or relative
+            val href = it.href.trim()
+            val url = when {
+                href.startsWith("http://", true) || href.startsWith("https://", true) -> href
+                href.startsWith("//") -> "https:$href"
+                href.startsWith("/") -> "$serverUrl$href"
+                else -> "$serverUrl/$href"
+            }
+
             val quality = "${videoInfo.team.name} (${it.quality}p Animelib)"
-            Video(url, quality, url, subtitleTracks = subtitles)
+
+            // Some servers require Referer/Origin headers for HLS to work; add them to the Video headers
+            val videoHeaders = Headers.Builder().apply {
+                set("Accept", "*/*")
+                set("Referer", "$baseUrl/")
+                set("Origin", "https://$domain")
+                set("User-Agent", "Mozilla/5.0 (Android)")
+            }.build()
+
+            // Debug log: report built url and headers
+            android.util.Log.d(
+                "Animelib",
+                "animelibVideoLinks: built url=$url href=$href team=${videoInfo.team.name} quality=${it.quality} serverUrl=$serverUrl headers=$videoHeaders",
+            )
+
+            Video(url, quality, url, headers = videoHeaders, subtitleTracks = subtitles)
         }
 
         return videoList
@@ -524,11 +595,65 @@ class Animelib :
         }
     }
 
+    // Extract plain text from summary which can be either a string or a structured JSON doc
+    private fun extractTextFromSummary(element: JsonElement?): String? {
+        if (element == null) return null
+
+        val sb = StringBuilder()
+
+        fun recurse(el: JsonElement) {
+            when (el) {
+                is JsonPrimitive -> {
+                    // Append primitive content (string, number, etc.)
+                    sb.append(el.content)
+                }
+                is JsonObject -> {
+                    // If node has a 'text' field, append it
+                    el["text"]?.let { textEl ->
+                        if (textEl is JsonPrimitive) sb.append(textEl.content)
+                    }
+                    // Recurse into 'content' arrays or other fields that may contain text
+                    el["content"]?.let { recurse(it) }
+                }
+                is JsonArray -> {
+                    for (child in el) {
+                        recurse(child)
+                        // Separate block nodes with a space
+                        sb.append(" ")
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        recurse(element)
+
+        val result = sb.toString().replace(Regex("\\s+"), " ").trim()
+        return if (result.isEmpty()) null else result
+    }
+
+    // Normalize cover URL which can be absolute, protocol-relative, or relative path
+    private fun normalizeCoverUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val trimmed = url.trim()
+
+        return when {
+            trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true) -> trimmed
+            trimmed.startsWith("//") -> "https:$trimmed"
+            trimmed.startsWith("/") -> "https://${defaultCoverDomain}$trimmed"
+            // If the URL contains the cover domain but lacks scheme
+            trimmed.contains(defaultCoverDomain) -> if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
+            else -> "https://$defaultCoverDomain/$trimmed"
+        }
+    }
+
     private fun AnimeData.toSAnime() = SAnime.create().apply {
         url = href
         title = rusName
-        thumbnail_url = cover.default
-        description = summary
+        thumbnail_url = normalizeCoverUrl(cover.default)
+        // Debug log: report normalized thumbnail URL
+        android.util.Log.d("Animelib", "toSAnime: anime=$href thumbnail=${thumbnail_url}")
+        description = extractTextFromSummary(summary)
         status = convertStatus(animeStatus.id)
         author = publisher?.joinToString { it.name }
         artist = authors?.joinToString { it.name }
