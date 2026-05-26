@@ -1,5 +1,4 @@
 package eu.kanade.tachiyomi.animeextension.ru.yummyanime
-import okhttp3.Request
 import android.util.Base64
 import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.sibnetextractor.SibnetExtractor
@@ -23,6 +22,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
+import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
 import java.net.URLDecoder
@@ -273,11 +273,11 @@ class YummyAnimeSource : AnimeHttpSource() {
         return extractHlsQualities(streamUrl, dubbing, "Alloha", videoHeaders)
     }
 
-	// ─── Kodik Player ────────────────────────────────────────────────────────
-	// Optimizations:
-	//   • Decoding via pure Kotlin (without loading JS script and QuickJs)
-	//   • QuickJs is used only as a fallback, one instance for all qualities
-	//   • Ready URLs from /ftor are returned directly as Video — without unnecessary m3u8 requests
+    // ─── Kodik Player ────────────────────────────────────────────────────────
+    // Optimizations:
+    //   • Decoding via pure Kotlin (without loading JS script and QuickJs)
+    //   • QuickJs is used only as a fallback, one instance for all qualities
+    //   • Ready URLs from /ftor are returned directly as Video — without unnecessary m3u8 requests
 
     private val atobRegex = Regex("atob\\([^\"]")
 
@@ -425,12 +425,12 @@ class YummyAnimeSource : AnimeHttpSource() {
         }
     }
 
-	 // Fast Kotlin decoding of Kodik without JS.
-	 // Kodik encodes a URL like this: base64url(reverse(url)), i.e. to decode:
-	 //   1. Normalize base64url → base64 (- → +, \_ → /)
-	 //   2. Reverse the string
-	 //   3. Decode base64
-	 // Returns null if the result does not look like a valid URL (fallback to QuickJs).
+    // Fast Kotlin decoding of Kodik without JS.
+    // Kodik encodes a URL like this: base64url(reverse(url)), i.e. to decode:
+    //   1. Normalize base64url → base64 (- → +, \_ → /)
+    //   2. Reverse the string
+    //   3. Decode base64
+    // Returns null if the result does not look like a valid URL (fallback to QuickJs).
 
     private fun decodeKodikKotlin(encoded: String): String? = runCatching {
         val normalized = encoded.replace('-', '+').replace('_', '/')
