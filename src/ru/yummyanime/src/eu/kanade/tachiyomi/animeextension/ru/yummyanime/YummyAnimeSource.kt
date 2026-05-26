@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.ru.yummyanime
 
 import android.util.Base64
+import aniyomi.lib.playlistutils.PlaylistUtils
+import aniyomi.lib.sibnetextractor.SibnetExtractor
 import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -21,7 +23,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
-import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
 import java.net.URLDecoder
@@ -35,10 +36,13 @@ class YummyAnimeSource : AnimeHttpSource() {
 
     private val apiUrl = "https://api.yani.tv"
     private val json: Json by injectLazy()
+    private val appToken = "o0nap18m_7a0od86"
+    private val sibnetExtractor by lazy { SibnetExtractor(client) }
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
         .add("User-Agent", "Mozilla/5.0 (Android)")
         .add("Accept", "application/json")
+        .add("X-Application", appToken)
 
     // ─── Popular ─────────────────────────────────────────────────────────────
 
@@ -175,7 +179,7 @@ class YummyAnimeSource : AnimeHttpSource() {
     override fun videoListParse(response: Response): List<Video> = emptyList()
 
     // ─── HLS quality parser ───────────────────────────────────────────────────
-    // Используется только для Alloha (Kodik уже даёт готовые URL по качествам)
+    // It is only used for Alloha (Kodik already provides ready-made URL for qualities)
 
     private fun extractHlsQualities(
         masterUrl: String,
@@ -226,40 +230,54 @@ class YummyAnimeSource : AnimeHttpSource() {
             .add("Origin", baseUrl)
             .add("User-Agent", "Mozilla/5.0 (Android)")
             .add("Accept", "text/html,application/xhtml+xml,*/*")
+            .add("X-Application", appToken)
             .build()
 
         val body = runCatching {
             client.newCall(GET(iframeUrl, allohaHeaders)).execute().body.string()
         }.getOrNull() ?: return emptyList()
 
-        // Alloha может хранить URL в разных форматах JS/JSON
+        // Alloha can store URLs in different JS/JSON formats?
         val streamUrl =
             // JSON: "hls": "https://..."
-            Regex(""""hls"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"""").find(body)?.groupValues?.get(1)
-                // JS: file: "..." или file:"..."
+            Regex("\"hls\"\\s*:\\s*\"(https?://[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*)\"").find(body)?.groupValues?.get(1)
+                // JS: file: "..." or file:"..."
                 ?: Regex("""[Ff]ile\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)""").find(body)?.groupValues?.get(1)
                 // JS: src: "..."
                 ?: Regex("""[Ss]rc\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)""").find(body)?.groupValues?.get(1)
-                // Alloha config-объект: {..." url":"https://..."
-                ?: Regex(""""url"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"""").find(body)?.groupValues?.get(1)
-                // Последний шанс: голая ссылка
+                // Alloha config-object: {..." url":"https://..."
+                ?: Regex("\"url\"\\s*:\\s*\"(https?://[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*)\"").find(body)?.groupValues?.get(1)
+                // Last chance: naked link (m3u8)
                 ?: Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""").find(body)?.value
+                // If there is no m3u8, it may be DASH (.mpd)
+                ?: Regex("""https?://[^"'\s\\]+\.mpd[^"'\s\\]*""").find(body)?.value
                 ?: return emptyList()
 
         val videoHeaders = Headers.Builder()
             .add("Referer", iframeUrl)
             .add("Origin", iframeUrl.toOrigin())
             .add("User-Agent", "Mozilla/5.0 (Android)")
+            .add("X-Application", appToken)
             .build()
+
+        // If the stream is DASH (.mpd), use PlaylistUtils
+        if (streamUrl.contains(".mpd")) {
+            return PlaylistUtils(client, headers).extractFromDash(
+                streamUrl,
+                { res: String -> "$dubbing (Alloha $res)" },
+                videoHeaders,
+                videoHeaders,
+            )
+        }
 
         return extractHlsQualities(streamUrl, dubbing, "Alloha", videoHeaders)
     }
 
-    // ─── Kodik Player ────────────────────────────────────────────────────────
-    // Оптимизации:
-    //   • Декодирование через чистый Kotlin (без загрузки JS-скрипта и QuickJs)
-    //   • QuickJs используется только как fallback, один экземпляр на все качества
-    //   • Готовые URL от /ftor возвращаются напрямую как Video — без лишних m3u8-запросов
+	// ─── Kodik Player ────────────────────────────────────────────────────────
+	// Optimizations:
+	//   • Decoding via pure Kotlin (without loading JS script and QuickJs)
+	//   • QuickJs is used only as a fallback, one instance for all qualities
+	//   • Ready URLs from /ftor are returned directly as Video — without unnecessary m3u8 requests
 
     private val atobRegex = Regex("atob\\([^\"]")
 
@@ -267,6 +285,7 @@ class YummyAnimeSource : AnimeHttpSource() {
         val kodikHeaders = Headers.Builder()
             .add("Referer", "$baseUrl/")
             .add("User-Agent", "Mozilla/5.0 (Android)")
+            .add("X-Application", appToken)
             .build()
 
         val page = runCatching {
@@ -283,7 +302,7 @@ class YummyAnimeSource : AnimeHttpSource() {
 
         if (formData.dSign.isEmpty()) return emptyList()
 
-        // Формат: //{host}/{type}/{id}/{hash}/720p?...
+        // Format: //{host}/{type}/{id}/{hash}/720p?...
         val urlParts = iframeUrl.removePrefix("https://").removePrefix("http://").split('/')
         if (urlParts.size < 4) return emptyList()
         val videoType = urlParts[1]
@@ -306,6 +325,7 @@ class YummyAnimeSource : AnimeHttpSource() {
             .add("Referer", "$baseUrl/")
             .add("Origin", baseUrl)
             .add("User-Agent", "Mozilla/5.0 (Android)")
+            .add("X-Application", appToken)
             .build()
 
         val kodikData = runCatching {
@@ -322,6 +342,7 @@ class YummyAnimeSource : AnimeHttpSource() {
             .add("Referer", "$baseUrl/")
             .add("Origin", baseUrl)
             .add("User-Agent", "Mozilla/5.0 (Android)")
+            .add("X-Application", appToken)
             .build()
 
         val qualityMap = mapOf(
@@ -330,8 +351,8 @@ class YummyAnimeSource : AnimeHttpSource() {
             "720" to kodikData.links.good,
         )
 
-        // --- Шаг 1: пробуем быстрое Kotlin-декодирование (без QuickJs, без HTTP) ---
-        // Kodik исторически использует: reverse(base64url_normalize(src)) → base64_decode → URL
+        // --- Step 1: Try fast Kotlin decoding (no QuickJs, no HTTP) ---
+        // Kodik historically uses: reverse(base64url_normalize(src)) → base64_decode → URL
         val kotlinResults = qualityMap.mapNotNull { (qualityName, links) ->
             val encodedSrc = links.firstOrNull()?.src ?: return@mapNotNull null
             val decoded = decodeKodikKotlin(encodedSrc) ?: return@mapNotNull null
@@ -339,37 +360,47 @@ class YummyAnimeSource : AnimeHttpSource() {
         }
 
         if (kotlinResults.size == qualityMap.size) {
-            // Все качества декодированы без QuickJs — возвращаем сразу
-            return kotlinResults.map { (qualityName, hlsUrl, _) ->
-                Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders)
+            // All qualities are decoded without QuickJs — we return them immediately
+            return kotlinResults.flatMap { (qualityName, hlsUrl, _) ->
+                if (hlsUrl.contains(".mpd")) {
+                    PlaylistUtils(client, headers).extractFromDash(
+                        hlsUrl,
+                        { res: String -> "$dubbing (${qualityName}p Kodik - $res)" },
+                        hlsHeaders,
+                        hlsHeaders,
+                    )
+                } else {
+                    listOf(Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders))
+                }
             }
         }
 
-        // --- Шаг 2: fallback — QuickJs, один экземпляр на все качества ---
+        // --- Step 2: fallback — QuickJs, one instance per quality ---
         val scriptUrl = page.selectFirst("script[src*=player_single]")?.attr("abs:src")
             ?: return kotlinResults.map { (q, url, _) ->
                 Video(url, "$dubbing (${q}p Kodik)", url, headers = hlsHeaders)
             }
 
         val jsScript = runCatching {
-            client.newCall(GET(scriptUrl)).execute().body.string()
+            client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
         }.getOrNull() ?: return emptyList()
 
         val atobMatch = atobRegex.find(jsScript) ?: return emptyList()
 
-        var encodeScript = ""
+        var encodeScript = "("
         val deque = ArrayDeque<Char>()
         deque.addFirst('(')
-        for (i in atobMatch.range.last..jsScript.length) {
+        for (i in atobMatch.range.last until jsScript.length) {
             val char = jsScript[i]
             when (char) {
                 '(', '{' -> deque.addFirst(char)
                 ')', '}' -> if (deque.isNotEmpty()) deque.removeFirst()
             }
-            if (deque.isNotEmpty()) encodeScript += char else break
+            encodeScript += char
+            if (deque.isEmpty()) break
         }
 
-        // Один QuickJs для всех качеств
+        // One QuickJs for all qualities
         return QuickJs.create().use { qjs ->
             qualityMap.flatMap { (qualityName, links) ->
                 val encodedSrc = links.firstOrNull()?.src ?: return@flatMap emptyList()
@@ -378,26 +409,35 @@ class YummyAnimeSource : AnimeHttpSource() {
                 }.getOrNull() ?: return@flatMap emptyList()
 
                 val hlsUrl = Base64.decode(base64Url, Base64.DEFAULT).toString(Charsets.UTF_8).fixProtocol()
-                // Готовые URL от Kodik — это уже конкретное качество, не master playlist
+                // If it's DASH, parse the mpd
+                if (hlsUrl.contains(".mpd")) {
+                    return@flatMap PlaylistUtils(client, headers).extractFromDash(
+                        hlsUrl,
+                        { res: String -> "$dubbing (${qualityName}p Kodik - $res)" },
+                        hlsHeaders,
+                        hlsHeaders,
+                    )
+                }
+
+                // Ready-made URLs from Kodik are already of a specific quality, not a master playlist
                 listOf(Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders))
             }
         }
     }
 
-    /**
-     * Быстрое Kotlin-декодирование Kodik без JS.
-     * Kodik кодирует URL так: base64url(reverse(url)), т.е. чтобы декодировать:
-     *   1. Нормализуем base64url → base64 (- → +, _ → /)
-     *   2. Переворачиваем строку
-     *   3. Декодируем base64
-     * Возвращает null если результат не похож на валидный URL (fallback на QuickJs).
-     */
+	 // Fast Kotlin decoding of Kodik without JS.
+	 // Kodik encodes a URL like this: base64url(reverse(url)), i.e. to decode:
+	 //   1. Normalize base64url → base64 (- → +, \_ → /)
+	 //   2. Reverse the string
+	 //   3. Decode base64
+	 // Returns null if the result does not look like a valid URL (fallback to QuickJs).
+
     private fun decodeKodikKotlin(encoded: String): String? = runCatching {
         val normalized = encoded.replace('-', '+').replace('_', '/')
         val reversed = normalized.reversed()
         val decoded = Base64.decode(reversed, Base64.DEFAULT).toString(Charsets.UTF_8)
         val url = decoded.fixProtocol()
-        // Проверяем что получился URL, а не мусор
+        // Check that the URL is correct and not garbage
         if (url.startsWith("http") && url.contains(".")) url else null
     }.getOrNull()
 
@@ -407,9 +447,55 @@ class YummyAnimeSource : AnimeHttpSource() {
         val body = runCatching {
             client.newCall(GET(iframeUrl, headers)).execute().body.string()
         }.getOrNull() ?: return emptyList()
-        val stream = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(body)?.value
+
+        // Let's try to parse Sibnet (the embedded player uses player.src)
+        if (iframeUrl.contains("sibnet.ru") || body.contains("player.src")) {
+            // Trying to find a videoid to send signals (player sends kibana/catch requests according to the logs)
+            val videoId = Regex("videoid=(\\d+)").find(body)?.groupValues?.get(1)
+                ?: Regex("videoid=(\\d+)").find(iframeUrl)?.groupValues?.get(1)
+
+            if (!videoId.isNullOrBlank()) {
+                runCatching {
+                    val rn = (Math.random() * 1_0000_0000).toInt()
+                    val catchUrl = "https://vst.sibnet.ru/catch?event=load&val=null&videoid=$videoId&referrer=$iframeUrl&rn=$rn"
+                    client.newCall(GET(catchUrl, headers.newBuilder().set("Referer", iframeUrl).build())).execute().close()
+                }
+            }
+
+            // We will use the general Sibnet extractor, if it is available
+            val sibVideos = runCatching { sibnetExtractor.videosFromUrl(iframeUrl, "$dubbing (Sibnet) ") }.getOrNull()
+            if (!sibVideos.isNullOrEmpty()) return sibVideos
+        }
+
+        // Let's check the DASH first
+        val mpd = Regex("""https?://[^"'\\s\\\\]+\\.mpd[^"'\\s\\\\]*""").find(body)?.value
+        if (mpd != null) {
+            val videoHeaders = Headers.Builder()
+                .add("Referer", iframeUrl)
+                .add("Origin", iframeUrl.toOrigin())
+                .add("User-Agent", "Mozilla/5.0 (Android)")
+                .add("X-Application", appToken)
+                .build()
+
+            return PlaylistUtils(client, headers).extractFromDash(
+                mpd,
+                { res: String -> "$dubbing (DASH $res)" },
+                videoHeaders,
+                videoHeaders,
+            )
+        }
+
+        val stream = Regex("""https?://[^"'\\s]+\\.m3u8[^"'\\s]*""").find(body)?.value
             ?: return emptyList()
-        return listOf(Video(stream, "$dubbing (Unknown)", stream))
+
+        val videoHeaders = Headers.Builder()
+            .add("Referer", iframeUrl)
+            .add("Origin", iframeUrl.toOrigin())
+            .add("User-Agent", "Mozilla/5.0 (Android)")
+            .add("X-Application", appToken)
+            .build()
+
+        return listOf(Video(stream, "$dubbing (Unknown)", stream, headers = videoHeaders))
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
