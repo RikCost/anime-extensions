@@ -94,16 +94,17 @@ class Animelib :
         .addInterceptor { chain ->
             val request = chain.request()
             val host = request.url.host
+            val apiHost = apiSite.toHttpUrl().host
             val builder = request.newBuilder()
 
             // Add Referer/Origin for cover and API hosts
-            if (host in coverDomains || host == apiSite.toHttpUrl().host) {
+            if (host in coverDomains || host == apiHost) {
                 builder.header("Referer", "https://$domain/")
                 builder.header("Origin", "https://$domain")
             }
 
             // Additional headers for API requests to bypass simple bot protections
-            if (host == apiSite.toHttpUrl().host) {
+            if (host == apiHost) {
                 builder.header("Accept", "application/json, text/plain, */*")
                 builder.header("X-Requested-With", "XMLHttpRequest")
                 builder.header("User-Agent", "Mozilla/5.0 (Android)")
