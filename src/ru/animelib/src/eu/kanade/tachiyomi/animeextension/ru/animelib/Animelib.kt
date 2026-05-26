@@ -646,8 +646,6 @@ class Animelib :
         url = href
         title = rusName
         thumbnail_url = normalizeCoverUrl(cover.default)
-        // Debug log: report normalized thumbnail URL
-        android.util.Log.d("Animelib", "toSAnime: anime=$href thumbnail=${thumbnail_url}")
         description = extractTextFromSummary(summary)
         status = convertStatus(animeStatus.id)
         author = publisher?.joinToString { it.name }
