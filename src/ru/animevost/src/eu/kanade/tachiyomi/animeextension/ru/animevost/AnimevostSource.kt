@@ -326,6 +326,18 @@ class AnimevostSource(override val name: String, override val baseUrl: String) :
         val seenUrls = mutableSetOf<String>()
         val animes = mutableListOf<SAnime>()
 
+        // DLE renders a dedicated block when a search yields no results.
+        // Detect it early so the fallback link-scraper below never picks up
+        // category/type nav-links (ТВ, OVA, ONA, Дунхуа, …) as fake anime cards.
+        val noResults = document.selectFirst(
+            ".searchnoresult, .search_noresult, " +
+                "div:containsOwn(Ничего не найдено), " +
+                "div:containsOwn(По вашему запросу ничего не найдено), " +
+                "div:containsOwn(Извините, по вашему запросу), " +
+                "p:containsOwn(Ничего не найдено)",
+        )
+        if (noResults != null) return AnimesPage(emptyList(), false)
+
         // DLE cards are always div.shortstory; search results may use div.searchnews /
         // div.searchitem.  Fall back to div.post / article if the theme uses different
         // markup.  We deliberately avoid broad selectors like .content or div:has(...)
@@ -350,11 +362,20 @@ class AnimevostSource(override val name: String, override val baseUrl: String) :
             val anime = SAnime.create()
             anime.setUrlWithoutDomain(href)
 
-            // Skip bare category/type pages whose URL slug is a short all-letter word
-            // like "tv", "ova", "ona", "film", "dunhua" (<=6 chars, no hyphens/digits).
-            // Real anime slugs are longer or contain a hyphen or digit.
+            // Skip bare category/type pages.
+            // 1) Short all-letter slugs (<=6 chars, no hyphens/digits) cover English
+            //    names like "tv", "ova", "ona", "film", "dunhua".
+            // 2) Known Russian/transliterated type labels that the site uses as nav-links
+            //    are blocked by an explicit denylist so they never appear as search results.
             val slug = href.trimEnd('/').substringAfterLast('/').lowercase()
+            val categoryDenylist = setOf(
+                "tv", "tvspeshl", "tv-speshl", "special", "speshl",
+                "ova", "ona", "film", "films", "movie",
+                "dunhua", "korotkometrazhniy", "korotkometrazhnyy",
+                "polnometrazhniy", "polnometrazhnyy",
+            )
             if (slug.length <= 6 && slug.all { it.isLetter() }) return@forEach
+            if (slug in categoryDenylist) return@forEach
 
             // Title: prefer the link title-attribute or img alt (set by the site),
             // then any heading text, then the link text itself.
