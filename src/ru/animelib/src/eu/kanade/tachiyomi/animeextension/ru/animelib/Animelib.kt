@@ -96,13 +96,11 @@ class Animelib :
             val host = request.url.host
             val apiHost = apiSite.toHttpUrl().host
             val builder = request.newBuilder()
-
             // Add Referer/Origin for cover and API hosts
             if (host in coverDomains || host == apiHost) {
                 builder.header("Referer", "https://$domain/")
                 builder.header("Origin", "https://$domain")
             }
-
             // Additional headers for API requests to bypass simple bot protections
             if (host == apiHost) {
                 builder.header("Accept", "application/json, text/plain, */*")
@@ -562,7 +560,6 @@ class Animelib :
                 set("Origin", "https://$domain")
                 set("User-Agent", "Mozilla/5.0 (Android)")
             }.build()
-
             Video(url, quality, url, headers = videoHeaders, subtitleTracks = subtitles)
         }
 
@@ -644,7 +641,13 @@ class Animelib :
 
     private fun AnimeData.toSAnime() = SAnime.create().apply {
         url = href
-        title = rusName
+        title = rusName ?: engName ?: run {
+            when (otherNames) {
+                is JsonArray -> otherNames.firstOrNull()?.let { if (it is JsonPrimitive) it.content else null }
+                is JsonPrimitive -> otherNames.content
+                else -> null
+            }
+        } ?: href
         thumbnail_url = normalizeCoverUrl(cover.default)
         description = extractTextFromSummary(summary)
         status = convertStatus(animeStatus.id)
