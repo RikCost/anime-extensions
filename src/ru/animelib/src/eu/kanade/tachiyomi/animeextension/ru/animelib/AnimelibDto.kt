@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.animeextension.ru.animelib
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
 
 @Serializable
 data class AnimeStatus(
@@ -42,7 +41,7 @@ data class AnimeData(
 
     // Optional
     @SerialName("is_licensed") val licensed: Boolean? = null,
-    val summary: JsonElement? = null,
+    val summary: String? = null,
     val genres: List<GenreInfo>? = null,
     val publisher: List<PublisherInfo>? = null,
     val authors: List<AuthorInfo>? = null,
