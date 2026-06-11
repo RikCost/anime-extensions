@@ -170,16 +170,12 @@ class YummyAnimeSource : AnimeHttpSource() {
 
             when {
                 player.contains("Kodik", ignoreCase = true) -> kodikVideoLinks(iframeUrl, dubbing)
-                player.contains("Alloha", ignoreCase = true) -> allohaVideoLinks(iframeUrl, dubbing)
                 else -> fallbackVideoLinks(iframeUrl, dubbing)
             }
         }
     }
 
     override fun videoListParse(response: Response): List<Video> = emptyList()
-
-    // ─── HLS quality parser ───────────────────────────────────────────────────
-    // It is only used for Alloha (Kodik already provides ready-made URL for qualities)
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
@@ -195,57 +191,6 @@ class YummyAnimeSource : AnimeHttpSource() {
         videoNameGen = { quality -> "$dubbing ($quality $playerName)" },
     ).ifEmpty {
         listOf(Video(masterUrl, "$dubbing ($playerName)", masterUrl, headers = videoHeaders))
-    }
-
-    // ─── Alloha Player ───────────────────────────────────────────────────────
-
-    private fun allohaVideoLinks(iframeUrl: String, dubbing: String): List<Video> {
-        val allohaHeaders = Headers.Builder()
-            .add("Referer", "$baseUrl/")
-            .add("Origin", baseUrl)
-            .add("User-Agent", "Mozilla/5.0 (Android)")
-            .add("Accept", "text/html,application/xhtml+xml,*/*")
-            .add("X-Application", appToken)
-            .build()
-
-        val body = runCatching {
-            client.newCall(GET(iframeUrl, allohaHeaders)).execute().body.string()
-        }.getOrNull() ?: return emptyList()
-
-        // Alloha can store URLs in different JS/JSON formats?
-        val streamUrl =
-            // JSON: "hls": "https://..."
-            Regex("\"hls\"\\s*:\\s*\"(https?://[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*)\"").find(body)?.groupValues?.get(1)
-                // JS: file: "..." or file:"..."
-                ?: Regex("""[Ff]ile\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)""").find(body)?.groupValues?.get(1)
-                // JS: src: "..."
-                ?: Regex("""[Ss]rc\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)""").find(body)?.groupValues?.get(1)
-                // Alloha config-object: {..." url":"https://..."
-                ?: Regex("\"url\"\\s*:\\s*\"(https?://[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*)\"").find(body)?.groupValues?.get(1)
-                // Last chance: naked link (m3u8)
-                ?: Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""").find(body)?.value
-                // If there is no m3u8, it may be DASH (.mpd)
-                ?: Regex("""https?://[^"'\s\\]+\.mpd[^"'\s\\]*""").find(body)?.value
-                ?: return emptyList()
-
-        val videoHeaders = Headers.Builder()
-            .add("Referer", iframeUrl)
-            .add("Origin", iframeUrl.toOrigin())
-            .add("User-Agent", "Mozilla/5.0 (Android)")
-            .add("X-Application", appToken)
-            .build()
-
-        // If the stream is DASH (.mpd), use PlaylistUtils
-        if (streamUrl.contains(".mpd")) {
-            return PlaylistUtils(client, headers).extractFromDash(
-                streamUrl,
-                { res: String -> "$dubbing (Alloha $res)" },
-                videoHeaders,
-                videoHeaders,
-            )
-        }
-
-        return extractHlsQualities(streamUrl, dubbing, "Alloha", videoHeaders)
     }
 
     // ─── Kodik Player ────────────────────────────────────────────────────────
