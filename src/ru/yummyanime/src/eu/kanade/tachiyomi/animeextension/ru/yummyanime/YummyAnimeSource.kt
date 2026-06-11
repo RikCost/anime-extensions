@@ -181,45 +181,20 @@ class YummyAnimeSource : AnimeHttpSource() {
     // ─── HLS quality parser ───────────────────────────────────────────────────
     // It is only used for Alloha (Kodik already provides ready-made URL for qualities)
 
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+
     private fun extractHlsQualities(
         masterUrl: String,
         dubbing: String,
         playerName: String,
         videoHeaders: Headers,
-    ): List<Video> {
-        val master = runCatching {
-            client.newCall(GET(masterUrl, videoHeaders)).execute().body.string()
-        }.getOrNull() ?: return listOf(Video(masterUrl, "$dubbing ($playerName)", masterUrl, headers = videoHeaders))
-
-        if (!master.contains("#EXT-X-STREAM-INF")) {
-            return listOf(Video(masterUrl, "$dubbing ($playerName)", masterUrl, headers = videoHeaders))
-        }
-
-        val baseUrl = masterUrl.substringBeforeLast("/")
-        val videos = mutableListOf<Video>()
-        val lines = master.lines()
-
-        for (i in lines.indices) {
-            val line = lines[i]
-            if (!line.startsWith("#EXT-X-STREAM-INF")) continue
-
-            val height = Regex("RESOLUTION=\\d+x(\\d+)").find(line)?.groupValues?.get(1)
-            val label = if (height != null) "${height}p" else "unknown"
-
-            val segmentLine = lines.getOrNull(i + 1)?.trim() ?: continue
-            if (segmentLine.startsWith("#") || segmentLine.isEmpty()) continue
-
-            val segUrl = when {
-                segmentLine.startsWith("http") -> segmentLine
-                segmentLine.startsWith("//") -> "https:$segmentLine"
-                else -> "$baseUrl/$segmentLine"
-            }
-            videos.add(Video(segUrl, "$dubbing ($label $playerName)", segUrl, headers = videoHeaders))
-        }
-
-        return videos.ifEmpty {
-            listOf(Video(masterUrl, "$dubbing ($playerName)", masterUrl, headers = videoHeaders))
-        }
+    ): List<Video> = playlistUtils.extractFromHls(
+        masterUrl,
+        masterHeaders = videoHeaders,
+        videoHeaders = videoHeaders,
+        videoNameGen = { quality -> "$dubbing ($quality $playerName)" },
+    ).ifEmpty {
+        listOf(Video(masterUrl, "$dubbing ($playerName)", masterUrl, headers = videoHeaders))
     }
 
     // ─── Alloha Player ───────────────────────────────────────────────────────
