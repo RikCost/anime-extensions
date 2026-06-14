@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.ru.yummyanime
 
+import android.net.Uri
 import android.util.Base64
 import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.sibnetextractor.SibnetExtractor
@@ -26,7 +27,6 @@ import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
-import java.net.URLDecoder
 
 class YummyAnime : AnimeHttpSource() {
 
@@ -212,11 +212,11 @@ class YummyAnime : AnimeHttpSource() {
 
         val postBody = FormBody.Builder()
             .add("d", formData.d)
-            .add("d_sign", URLDecoder.decode(formData.dSign, "utf-8"))
+            .add("d_sign", Uri.decode(formData.dSign))
             .add("pd", formData.pd)
-            .add("pd_sign", URLDecoder.decode(formData.pdSign, "utf-8"))
-            .add("ref", URLDecoder.decode(formData.ref, "utf-8"))
-            .add("ref_sign", URLDecoder.decode(formData.refSign, "utf-8"))
+            .add("pd_sign", Uri.decode(formData.pdSign))
+            .add("ref", Uri.decode(formData.ref))
+            .add("ref_sign", Uri.decode(formData.refSign))
             .add("type", videoType)
             .add("id", videoId)
             .add("hash", videoHash)
