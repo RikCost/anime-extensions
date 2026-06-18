@@ -318,7 +318,12 @@ class Rezka :
     private fun parseSubtitles(data: String): List<Track> = Regex("""\[([^\]]+)]([^,\[]+)""").findAll(data).mapNotNull { match ->
         val lang = match.groupValues[1].trim()
         val url = match.groupValues[2].trim()
-        if (url.startsWith("http")) runCatching { Track(url, lang) }.getOrNull() else null
+        val normalized = if (url.startsWith("//")) "https:$url" else url
+        if (normalized.startsWith("http")) {
+            runCatching { Track(normalized, lang) }.getOrNull()
+        } else {
+            null
+        }
     }.toList()
 
     // ─── HDRezka "trash" decoder ────────────────────────────────────────────────
