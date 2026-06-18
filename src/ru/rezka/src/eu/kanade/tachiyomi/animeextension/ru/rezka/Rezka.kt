@@ -235,7 +235,7 @@ class Rezka :
             }.build()
 
             val cdnUrl = "$baseUrl/ajax/get_cdn_series/?t=${System.currentTimeMillis()}"
-            val json = client.newCall(POST(cdnUrl, ajaxHeaders(), body)).execute().use { it.body.string() }
+            val json = client.newCall(POST(cdnUrl, ajaxHeaders(), body)).awaitSuccess().use { it.body.string() }
 
             val encoded = Regex(""""url"\s*:\s*"(.*?[^\\])"""").find(json)?.groupValues?.get(1)
                 ?.replace("\\/", "/")?.decodeJsonUnicode()
