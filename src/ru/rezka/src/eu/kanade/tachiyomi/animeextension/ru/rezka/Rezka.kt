@@ -208,7 +208,7 @@ class Rezka :
 
         val postId = Regex("""initCDN(?:Movies|Series)Events\((\d+)""").find(html)?.groupValues?.get(1)
             ?: document.selectFirst("#post_id")?.attr("value")
-            ?: titlePath.trimStart('/').substringBefore('-').takeIf { it.all(Char::isDigit) }
+            ?: titlePath.trimStart('/').substringBefore('-').takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
             ?: return emptyList()
 
         val favs = Regex("""['"]?favs['"]?\s*[:=]\s*['"]([a-f0-9-]+)['"]""").find(html)?.groupValues?.get(1)
