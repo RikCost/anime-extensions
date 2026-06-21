@@ -152,7 +152,12 @@ class Voiranime : ParsedAnimeHttpSource() {
 
         // Server list — the host-select options are duplicated for desktop/mobile, so dedupe.
         val servers = document.select("select.host-select option")
-            .mapNotNull { it.text().trim().takeIf(String::isNotBlank) }
+            .mapNotNull { option ->
+                option.attr("value")
+                    .ifBlank { option.text() }
+                    .trim()
+                    .takeIf(String::isNotBlank)
+            }
             .distinct()
 
         if (servers.isEmpty()) return emptyList()
