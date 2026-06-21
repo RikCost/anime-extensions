@@ -120,11 +120,16 @@ class Aniliberty :
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val release = response.parseAs<Release>()
-        return release.episodes.map { ep ->
+        return release.episodes.mapNotNull { ep ->
+            val epId = ep.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             SEpisode.create().apply {
-                url = "${release.id}|${ep.id}"
+                url = "${release.id}|$epId"
                 name = ep.name?.takeIf { it.isNotBlank() }
-                    ?: "Серия ${ep.ordinal?.formatOrdinal() ?: ""}".trim()
+                    ?: if (release.type?.value == "MOVIE") {
+                        "Фильм"
+                    } else {
+                        "Серия ${ep.ordinal?.formatOrdinal() ?: ""}".trim()
+                    }
                 episode_number = ep.ordinal ?: 0f
             }
         }.sortedByDescending { it.episode_number }
@@ -165,14 +170,16 @@ class Aniliberty :
 
     private fun Release.toSAnime(): SAnime = SAnime.create().apply {
         url = "$id|${alias.orEmpty()}"
-        title = name?.main?.takeIf { it.isNotBlank() } ?: name?.english.orEmpty()
+        title = name?.main?.takeIf { it.isNotBlank() }
+            ?: name?.english?.takeIf { it.isNotBlank() }
+            ?: "Без названия"
         thumbnail_url = poster?.bestSrc()?.let { if (it.startsWith("http")) it else "$baseUrl$it" }
         description = buildString {
             year?.let { append("Год: $it\n") }
             type?.description?.let { append("Тип: $it\n") }
             if (isNotEmpty()) append("\n")
             append(this@toSAnime.description.orEmpty())
-        }.trim()
+        }.trim().ifBlank { null }
         genre = genres.mapNotNull { it.name }.joinToString().ifBlank { null }
         status = if (isOngoing) SAnime.ONGOING else SAnime.COMPLETED
     }
