@@ -102,7 +102,7 @@ class Voiranime : ParsedAnimeHttpSource() {
         description = document.selectFirst(".description-summary .summary__content, .manga-excerpt")
             ?.text()?.trim()
         genre = document.select(".genres-content a").joinToString { it.text() }.ifBlank { null }
-        author = info["studios"]?.takeIf { it.isNotBlank() }
+        author = (info["studio"] ?: info["studios"])?.takeIf { it.isNotBlank() }
         status = when (info["status"]?.lowercase()?.trim()) {
             "en cours" -> SAnime.ONGOING
             "terminé", "termine", "complété", "completed" -> SAnime.COMPLETED
