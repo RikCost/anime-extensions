@@ -102,7 +102,7 @@ class Voiranime : ParsedAnimeHttpSource() {
         description = document.selectFirst(".description-summary .summary__content, .manga-excerpt")
             ?.text()?.trim()
         genre = document.select(".genres-content a").joinToString { it.text() }.ifBlank { null }
-        author = (info["studio"] ?: info["studios"])?.takeIf { it.isNotBlank() }
+        author = info["studios"]?.takeIf { it.isNotBlank() }
         status = when (info["status"]?.lowercase()?.trim()) {
             "en cours" -> SAnime.ONGOING
             "terminé", "termine", "complété", "completed" -> SAnime.COMPLETED
@@ -152,12 +152,7 @@ class Voiranime : ParsedAnimeHttpSource() {
 
         // Server list — the host-select options are duplicated for desktop/mobile, so dedupe.
         val servers = document.select("select.host-select option")
-            .mapNotNull { option ->
-                option.attr("value")
-                    .ifBlank { option.text() }
-                    .trim()
-                    .takeIf(String::isNotBlank)
-            }
+            .mapNotNull { it.text().trim().takeIf(String::isNotBlank) }
             .distinct()
 
         if (servers.isEmpty()) return emptyList()
