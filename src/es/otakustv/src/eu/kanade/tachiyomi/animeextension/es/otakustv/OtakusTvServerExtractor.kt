@@ -46,9 +46,13 @@ class OtakusTvServerExtractor {
             }
             webview.webViewClient = object : WebViewClient() {
                 private var finished = false
+                private var polling = false
                 private var attempts = 0
 
                 override fun onPageFinished(view: WebView, url: String) {
+                    // onPageFinished may fire repeatedly (redirects/iframes); poll only once.
+                    if (polling) return
+                    polling = true
                     poll(view)
                 }
 
