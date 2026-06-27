@@ -34,12 +34,7 @@ class OtakusTV : ParsedAnimeHttpSource() {
 
     override val supportsLatest = true
 
-    private val userAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/124.0.0.0 Safari/537.36"
-
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("User-Agent", userAgent)
         .add("Referer", "$baseUrl/")
 
     // ─── Extractors ─────────────────────────────────────────────────────────────
@@ -52,7 +47,7 @@ class OtakusTV : ParsedAnimeHttpSource() {
     private val mixDropExtractor by lazy { MixDropExtractor(client) }
     private val luluExtractor by lazy { LuluExtractor(client, headers) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
-    private val serverExtractor by lazy { OtakusTvServerExtractor(headers) }
+    private val serverExtractor by lazy { OtakusTvServerExtractor() }
 
     // ─── Popular ─────────────────────────────────────────────────────────────────
 

@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
  * Replicating that obfuscated cipher is brittle, so instead we let the page's own JavaScript
  * run inside a WebView and simply harvest the resulting `encrypt` attributes once they appear.
  */
-class OtakusTvServerExtractor(private val globalHeaders: Headers) {
+class OtakusTvServerExtractor {
 
     private val context: Application by injectLazy()
     private val handler by lazy { Handler(Looper.getMainLooper()) }
@@ -43,7 +43,6 @@ class OtakusTvServerExtractor(private val globalHeaders: Headers) {
                 databaseEnabled = true
                 blockNetworkImage = true
                 loadsImagesAutomatically = false
-                userAgentString = globalHeaders["User-Agent"]
             }
             webview.webViewClient = object : WebViewClient() {
                 private var finished = false
