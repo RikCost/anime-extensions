@@ -1,0 +1,9 @@
+ext {
+    extName = 'RuTracker'
+    extClass = '.RuTracker'
+    extVersionCode = 1
+    isTorrent = true
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"
