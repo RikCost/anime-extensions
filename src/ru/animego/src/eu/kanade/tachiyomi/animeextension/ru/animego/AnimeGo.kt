@@ -238,8 +238,7 @@ class AnimeGo :
             .mapNotNull { EP_COUNT_REGEX.find(it.text())?.groupValues?.get(1)?.toIntOrNull() }
             .maxOrNull() ?: 0
 
-        val total = maxOf(fromSeriesBox, fromTranslations)
-        if (total == 0) throw Exception("Не удалось получить список серий")
+        val total = maxOf(fromSeriesBox, fromTranslations).coerceAtLeast(1)
 
         return (total downTo 1).map { ep ->
             SEpisode.create().apply {
