@@ -3,7 +3,7 @@ ext {
     extClass = '.RuTracker'
     extVersionCode = 1
     isTorrent = true
-    isNsfw = false
+    isNsfw = true
 }
 
 apply plugin: "kei.plugins.extension.legacy"
