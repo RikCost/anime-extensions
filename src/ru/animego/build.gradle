@@ -1,5 +1,5 @@
 ext {
-    extName = 'AnimeGO'
+    extName = 'AnimeGO.studio'
     extClass = '.AnimeGo'
     extVersionCode = 1
     isNsfw = false
