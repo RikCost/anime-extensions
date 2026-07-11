@@ -19,13 +19,13 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -80,21 +80,15 @@ class JutsuTv :
             if (query.length < 4) throw Exception("Минимальная длина поискового запроса — 4 символа")
 
             val postHeaders = headers.newBuilder()
+                .add("Content-Type", "application/x-www-form-urlencoded")
                 .add("Origin", baseUrl)
                 .build()
 
-            val body = FormBody.Builder()
-                .add("do", "search")
-                .add("subaction", "search")
-                .apply {
-                    if (page > 1) {
-                        add("search_start", page.toString())
-                        add("full_search", "0")
-                        add("result_from", ((page - 1) * 10 + 1).toString())
-                    }
-                }
-                .add("story", query)
-                .build()
+            val body = buildString {
+                append("do=search&subaction=search")
+                if (page > 1) append("&search_start=$page&full_search=0&result_from=${(page - 1) * 10 + 1}")
+                append("&story=${Uri.encode(query)}")
+            }.toRequestBody("application/x-www-form-urlencoded".toMediaType())
 
             return if (page == 1) {
                 POST("$baseUrl/", body = body, headers = postHeaders)
@@ -217,8 +211,12 @@ class JutsuTv :
 
         genre = document.select("ul.jutsutv-zfx__list li:has(span:contains(Жанр)) a")
             .joinToString { it.text() }
+        // Студия; если её нет на странице — имя режиссёра.
+        // ("Режисс" покрывает оба написания: «Режиссер» и «Режиссёр».)
         author = document.selectFirst("ul.jutsutv-zfx__list li:has(span:contains(Студия))")
-            ?.text()?.substringAfter(":")?.trim()
+            ?.text()?.substringAfter(":")?.trim()?.takeIf { it.isNotBlank() }
+            ?: document.selectFirst("ul.jutsutv-zfx__list li:has(span:contains(Режисс))")
+                ?.text()?.substringAfter(":")?.trim()
 
         // The status <li> carries a malformed attribute (=""), which some parsers choke
         // on — fall back from the label span to the li text to a whole-page regex.
@@ -392,6 +390,10 @@ class JutsuTv :
         return Jsoup.parse(body.replace(SELF_CLOSING_SCRIPT_REGEX, "<script$1></script>"), url)
     }
 
+    private fun isUrlAvailable(url: String, headers: Headers): Boolean = runCatching {
+        client.newCall(GET(url, headers)).execute().use { it.isSuccessful }
+    }.getOrDefault(false)
+
     private fun kodikVideoLinks(playerPageUrl: String, dubbing: String): List<Video> {
         val page = runCatching {
             fetchKodikDocument(playerPageUrl)
@@ -476,7 +478,7 @@ class JutsuTv :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.newCall(GET(scriptUrl, kodikHeaders)).execute().use { it.body.string() }
+                client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
             }.getOrNull() ?: return emptyList()
         }
 
@@ -504,6 +506,7 @@ class JutsuTv :
             "360" to kodikData.links.ugly,
             "480" to kodikData.links.bad,
             "720" to kodikData.links.good,
+            "1080" to kodikData.links.full,
         )
 
         return QuickJs.create().use { qjs ->
@@ -525,7 +528,17 @@ class JutsuTv :
                         hlsHeaders,
                     )
                 } else {
-                    listOf(Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders))
+                    buildList {
+                        // Kodik's API reports at most 720p, but the CDN usually stores a
+                        // 1080p rendition at the same path — probe for it.
+                        if (qualityName == "720" && kodikData.links.full.isEmpty()) {
+                            val hlsUrl1080 = hlsUrl.replace("/720.mp4", "/1080.mp4")
+                            if (hlsUrl1080 != hlsUrl && isUrlAvailable(hlsUrl1080, hlsHeaders)) {
+                                add(Video(hlsUrl1080, "$dubbing (1080p Kodik)", hlsUrl1080, headers = hlsHeaders))
+                            }
+                        }
+                        add(Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders))
+                    }
                 }
             }
         }
@@ -537,8 +550,8 @@ class JutsuTv :
         ListPreference(screen.context).apply {
             key = PREF_QUALITY_KEY
             title = "Предпочитаемое качество"
-            entries = arrayOf("720p", "480p", "360p")
-            entryValues = arrayOf("720", "480", "360")
+            entries = arrayOf("1080p", "720p", "480p", "360p")
+            entryValues = arrayOf("1080", "720", "480", "360")
             setDefaultValue(PREF_QUALITY_DEFAULT)
             summary = "%s"
         }.also(screen::addPreference)
@@ -550,7 +563,7 @@ class JutsuTv :
 
     companion object {
         private const val PREF_QUALITY_KEY = "pref_quality"
-        private const val PREF_QUALITY_DEFAULT = "720"
+        private const val PREF_QUALITY_DEFAULT = "1080"
 
         private val EP_COUNT_REGEX = Regex("""\((\d+)\s*эп""")
         private val STATUS_REGEX = Regex("""Статус:\s*([А-Яа-яёЁ]+)""")
@@ -559,34 +572,3 @@ class JutsuTv :
         private val SELF_CLOSING_SCRIPT_REGEX = Regex("""<script([^>]*)/>""")
     }
 }
-
-// ─── DTOs ────────────────────────────────────────────────────────────────────
-
-@Serializable
-private data class PlayerResponse(
-    val success: Boolean = false,
-    val data: String = "",
-)
-
-@Serializable
-private data class KodikFormData(
-    val d: String = "",
-    @SerialName("d_sign") val dSign: String = "",
-    val pd: String = "",
-    @SerialName("pd_sign") val pdSign: String = "",
-    val ref: String = "",
-    @SerialName("ref_sign") val refSign: String = "",
-)
-
-@Serializable
-private data class KodikVideoInfo(val src: String)
-
-@Serializable
-private data class KodikVideoQuality(
-    @SerialName("360") val ugly: List<KodikVideoInfo> = emptyList(),
-    @SerialName("480") val bad: List<KodikVideoInfo> = emptyList(),
-    @SerialName("720") val good: List<KodikVideoInfo> = emptyList(),
-)
-
-@Serializable
-private data class KodikData(val links: KodikVideoQuality)
