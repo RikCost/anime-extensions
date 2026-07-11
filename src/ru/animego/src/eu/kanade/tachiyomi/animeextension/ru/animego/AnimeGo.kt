@@ -19,8 +19,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -197,10 +195,15 @@ class AnimeGo :
         author = document.select("div.item-page ul.item__list li:has(span:contains(Студия)) a")
             .joinToString { it.text() }
             .ifBlank { null }
+        val statusText = document.selectFirst("div.item-page ul.item__list li:has(span:contains(Статус))")
+            ?.text() ?: ""
         status = when {
-            document.selectFirst("div.item-page ul.item__list li:has(span:contains(Статус)) a[href*=ongoing]") != null -> SAnime.ONGOING
-            document.selectFirst("div.item-page ul.item__list li:has(span:contains(Статус))")
-                ?.text()?.contains("Вышел", ignoreCase = true) == true -> SAnime.COMPLETED
+            statusText.contains("Онгоинг", ignoreCase = true) -> SAnime.ONGOING
+            // Aniyomi has no dedicated "announced" status — the closest one is ONGOING.
+            statusText.contains("Анонс", ignoreCase = true) -> SAnime.ONGOING
+            // «Заверш» покрывает оба написания: «Завершён» и «Завершен».
+            statusText.contains("Заверш", ignoreCase = true) -> SAnime.COMPLETED
+            statusText.contains("Вышел", ignoreCase = true) -> SAnime.COMPLETED
             else -> SAnime.UNKNOWN
         }
     }
@@ -211,7 +214,6 @@ class AnimeGo :
         val document = response.asJsoup()
         val iframeSrc = document.selectFirst("iframe[data-src*=kodik], iframe[src*=kodik]")
             ?.let { it.attr("data-src").ifBlank { it.attr("src") } }
-            ?.takeIf { it.isNotBlank() }
             ?: throw Exception("Плеер Kodik не найден на странице")
 
         val playerUrl = iframeSrc.fixProtocol()
@@ -238,7 +240,8 @@ class AnimeGo :
             .mapNotNull { EP_COUNT_REGEX.find(it.text())?.groupValues?.get(1)?.toIntOrNull() }
             .maxOrNull() ?: 0
 
-        val total = maxOf(fromSeriesBox, fromTranslations).coerceAtLeast(1)
+        val total = maxOf(fromSeriesBox, fromTranslations)
+        if (total == 0) throw Exception("Не удалось получить список серий")
 
         return (total downTo 1).map { ep ->
             SEpisode.create().apply {
@@ -432,7 +435,7 @@ class AnimeGo :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.newCall(GET(scriptUrl, kodikHeaders)).execute().use { it.body.string() }
+                client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
             }.getOrNull() ?: return emptyList()
         }
 
@@ -514,28 +517,3 @@ class AnimeGo :
         private val QUALITY_REGEX = Regex("""(\d{3,4})\s*p""")
     }
 }
-
-// ─── Kodik DTOs ──────────────────────────────────────────────────────────────
-
-@Serializable
-private data class KodikFormData(
-    val d: String = "",
-    @SerialName("d_sign") val dSign: String = "",
-    val pd: String = "",
-    @SerialName("pd_sign") val pdSign: String = "",
-    val ref: String = "",
-    @SerialName("ref_sign") val refSign: String = "",
-)
-
-@Serializable
-private data class KodikVideoInfo(val src: String)
-
-@Serializable
-private data class KodikVideoQuality(
-    @SerialName("360") val ugly: List<KodikVideoInfo> = emptyList(),
-    @SerialName("480") val bad: List<KodikVideoInfo> = emptyList(),
-    @SerialName("720") val good: List<KodikVideoInfo> = emptyList(),
-)
-
-@Serializable
-private data class KodikData(val links: KodikVideoQuality)
