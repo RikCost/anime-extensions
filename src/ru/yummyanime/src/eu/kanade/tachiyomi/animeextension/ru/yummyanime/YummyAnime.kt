@@ -63,7 +63,7 @@ class YummyAnime :
 
         SwitchPreferenceCompat(screen.context).apply {
             key = PREF_ALLOHA_KEY
-            title = "Парсить плеер Alloha / Parse Alloha player"
+            title = "Парсить плеер Alloha (beta) / Parse Alloha player (beta)"
             summary = "Alloha извлекается через WebView при запуске видео (5-25 секунд). " +
                 "Отключите, если озвучки Alloha не воспроизводятся."
             setDefaultValue(PREF_ALLOHA_DEFAULT)
@@ -600,7 +600,7 @@ class YummyAnime :
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "720"
         private const val PREF_ALLOHA_KEY = "pref_parse_alloha"
-        private const val PREF_ALLOHA_DEFAULT = true
+        private const val PREF_ALLOHA_DEFAULT = false
         private const val PREF_ALLOHA_SUBS_KEY = "pref_alloha_subs"
         private const val PREF_ALLOHA_SUBS_DEFAULT = false
 
