@@ -124,12 +124,13 @@ class Aniliberty :
             val epId = ep.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             SEpisode.create().apply {
                 url = "${release.id}|$epId"
-                name = ep.name?.takeIf { it.isNotBlank() }
-                    ?: if (release.type?.value == "MOVIE") {
-                        "Фильм"
-                    } else {
-                        "Серия ${ep.ordinal?.formatOrdinal() ?: ""}".trim()
-                    }
+                val base = if (release.type?.value == "MOVIE") {
+                    "Фильм"
+                } else {
+                    "Серия ${ep.ordinal?.formatOrdinal() ?: ""}".trim()
+                }
+                val title = ep.name?.takeIf { it.isNotBlank() }
+                name = if (title != null) "$base. $title" else base
                 episode_number = ep.ordinal ?: 0f
             }
         }.sortedByDescending { it.episode_number }
