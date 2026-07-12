@@ -7,6 +7,7 @@ import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.sibnetextractor.SibnetExtractor
+import aniyomi.lib.vkextractor.VkExtractor
 import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -41,6 +42,7 @@ class YummyAnime :
     private val appToken = "o0nap18m_7a0od86"
     private val sibnetExtractor by lazy { SibnetExtractor(client) }
     private val allohaExtractor by lazy { AllohaExtractor(client) }
+    private val vkExtractor by lazy { VkExtractor(client, headers) }
     private val preferences by getPreferencesLazy()
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
@@ -223,6 +225,9 @@ class YummyAnime :
             when {
                 player.contains("Kodik", ignoreCase = true) -> {
                     kodikVideoLinks(iframeUrl, dubbing, episodePlaybackIdentity)
+                }
+                player.contains("VK", ignoreCase = true) -> {
+                    vkVideoLinks(iframeUrl, dubbing, episodePlaybackIdentity)
                 }
                 player.contains("Alloha", ignoreCase = true) -> {
                     when {
@@ -495,6 +500,29 @@ class YummyAnime :
                 headers = hlsHeaders,
             ),
         )
+    }
+
+    // ============================== VK Player ================================
+
+    /**
+     * The YummyAnime "Плеер VK" iframe is a thin wrapper:
+     * `//ru.yummyani.me/iframeVK.html?id={oid}_{videoId}`. The id is a standard VK
+     * video identifier, so it is turned into a `video_ext.php` embed URL and handed to
+     * the shared [VkExtractor], which resolves the direct mp4 streams.
+     */
+    private suspend fun vkVideoLinks(
+        iframeUrl: String,
+        dubbing: String,
+        episodePlaybackIdentity: String,
+    ): List<Video> {
+        val id = iframeUrl.toHttpUrl().queryParameter("id") ?: return emptyList()
+        val parts = id.split("_", limit = 2)
+        if (parts.size != 2) return emptyList()
+
+        val embedUrl = "https://vk.com/video_ext.php?oid=${parts[0]}&id=${parts[1]}"
+
+        return vkExtractor.videosFromUrl(embedUrl, prefix = "$dubbing (VK) ")
+            .map { Video(episodePlaybackIdentity, it.quality, it.videoUrl, it.headers) }
     }
 
     // =========================== Fallback Player =============================
