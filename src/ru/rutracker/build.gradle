@@ -1,9 +1,13 @@
 ext {
     extName = 'RuTracker'
     extClass = '.RuTracker'
-    extVersionCode = 1
+    extVersionCode = 2
     isTorrent = true
     isNsfw = true
 }
 
 apply plugin: "kei.plugins.extension.legacy"
+
+dependencies {
+    implementation(project(":lib:cloudflareinterceptor"))
+}
