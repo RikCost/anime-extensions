@@ -446,7 +446,8 @@ class RuTracker :
 
         private val WHITESPACE_REGEX = Regex("""\s+""")
 
-        // Sections to keep — movies, series, documentaries (roots match all declensions/subforums).
+        // Sections to keep — movies, series, documentaries, TV/entertainment shows, anime,
+        // cartoons (roots match all declensions/subforums).
         private val ALLOWED_SECTION_KEYWORDS = listOf(
             "кино",
             "фильм",
@@ -454,6 +455,10 @@ class RuTracker :
             "документал",
             "теленовелл",
             "мультсериал",
+            "мультфил",
+            "передач",
+            "шоу",
+            "аниме",
         )
 
         // Sections to drop even if a keyword above accidentally matches (e.g. "документальная
