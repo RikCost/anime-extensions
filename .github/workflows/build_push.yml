@@ -34,20 +34,40 @@ jobs:
       latestCommitMessage: ${{ steps.set-env.outputs.LATEST_COMMIT_MESSAGE }}
       matrix: ${{ steps.generate-matrices.outputs.matrix }}
       delete: ${{ steps.generate-matrices.outputs.delete }}
+      skipBump: ${{ steps.set-env.outputs.SKIP_BUMP }}
     steps:
       - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Set env
         id: set-env
         run: |
+          LATEST_COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           echo "LATEST_COMMIT_MESSAGE<<{delimiter}
-          $(git log -1 --pretty=%B)
+          $LATEST_COMMIT_MESSAGE
 
           Built on commit: $(git log -1 --pretty=%H)
           {delimiter}" >> $GITHUB_OUTPUT
+
+          # Commit message markers:
+          #   [skip bumping version] -> skip the version bumping step only
+          #   [skip yuzono ci]       -> skip the version bumping step and emit empty
+          #                             build matrices, so the build job does not run
+          skip_bump=false
+          skip_build=false
+          case "$LATEST_COMMIT_MESSAGE" in
+            "[skip yuzono ci]"*)
+              skip_bump=true
+              skip_build=true
+              ;;
+            "[skip bumping version]"*)
+              skip_bump=true
+              ;;
+          esac
+          echo "SKIP_BUMP=$skip_bump" >> $GITHUB_OUTPUT
+          echo "SKIP_BUILD=$skip_build" >> $GITHUB_OUTPUT
 
       - name: Find lib changes
         id: modified-libs
@@ -63,7 +83,7 @@ jobs:
         # If any changes caused by the merge commit, skip this step because versions should already pumped with that merge.
         # But that should be avoided because our own extensions may not be bumped.
       - name: Bump extensions that use a modified lib
-        if: steps.modified-libs.outputs.any_changed == 'true' && github.repository == 'yuzono/anime-extensions'
+        if: steps.modified-libs.outputs.any_changed == 'true' && steps.set-env.outputs.SKIP_BUMP != 'true' && github.repository == 'yuzono/anime-extensions'
         env:
           COMMIT_MESSAGE: ${{ steps.set-env.outputs.LATEST_COMMIT_MESSAGE }}
         run: |
@@ -82,8 +102,16 @@ jobs:
 
       - id: generate-matrices
         name: Create output matrices
+        env:
+          SKIP_BUILD: ${{ steps.set-env.outputs.SKIP_BUILD }}
         run: |
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
+          if [ "$SKIP_BUILD" = "true" ]; then
+            echo "Skipping build: emitting empty matrices."
+            echo 'matrix={"chunk":[]}' >> $GITHUB_OUTPUT
+            echo 'delete=[]' >> $GITHUB_OUTPUT
+          else
+            python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
+          fi
 
   build:
     name: Build extensions (${{ matrix.chunk.number }})
@@ -95,19 +123,19 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref_name }}
           persist-credentials: false
 
       - name: Set up Java
-        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           java-version: 17
           distribution: temurin
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ matrix.chunk.number > 1 }}
 
@@ -144,7 +172,11 @@ jobs:
   publish:
     name: Publish extension repo
     needs: [prepare, build]
-    if: always() && github.repository == 'yuzono/anime-extensions'
+    if: >-
+      !cancelled()
+      && needs.prepare.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+      && github.repository == 'yuzono/anime-extensions'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -154,13 +186,13 @@ jobs:
           path: ~/apk-artifacts
 
       - name: Set up JDK
-        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           java-version: 17
           distribution: temurin
 
       - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref_name }}
           path: ${{ github.ref_name }}
@@ -177,7 +209,7 @@ jobs:
           python ./.github/scripts/create-repo.py
 
       - name: Checkout repo branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: yuzono/aniyomi-repo
           token: ${{ secrets.BOT_PAT }}
@@ -194,7 +226,7 @@ jobs:
           python ../${{ github.ref_name }}/.github/scripts/merge-repo.py "$DELETE" '${{ github.ref_name }}/repo'
 
       - name: Deploy repo
-        uses: EndBug/add-and-commit@290ea2c423ad77ca9c62ae0f5b224379612c0321 # v10.0.0
+        uses: EndBug/add-and-commit@cc9c08ba6c8df3b93a8f2db63e89b98368ae2ae8 # v11.1.1
         with:
           message: "${{ needs.prepare.outputs.latestCommitMessage }}"
           cwd: "./repo"

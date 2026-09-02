@@ -14,9 +14,9 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
@@ -33,7 +33,7 @@ import java.security.MessageDigest
 import kotlin.time.Duration.Companion.seconds
 
 class FunAnimeTV :
-    AnimeHttpSource(),
+    AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
     override val name = "Fun Anime TV"
@@ -291,7 +291,7 @@ class FunAnimeTV :
             videos.add(Video(videoUrl, "1080p", videoUrl))
         }
 
-        return videos.sort()
+        return videos
     }
 
     // ============================== Settings ==============================
@@ -316,15 +316,15 @@ class FunAnimeTV :
     }
 
     // ============================= Utilities ==============================
-    override fun List<Video>.sort(): List<Video> {
+    override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
         val lang = preferences.getString(PREF_LANGUAGE_KEY, PREF_LANGUAGE_DEFAULT)!!
 
         return sortedWith(
-            compareByDescending<Video> { it.quality.contains(lang) }
-                .thenByDescending { it.quality.contains(quality) }
+            compareByDescending<Video> { it.videoTitle.contains(lang) }
+                .thenByDescending { it.videoTitle.contains(quality) }
                 .thenByDescending {
-                    REGEX_QUALITY.find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    REGEX_QUALITY.find(it.videoTitle)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 },
         )
     }

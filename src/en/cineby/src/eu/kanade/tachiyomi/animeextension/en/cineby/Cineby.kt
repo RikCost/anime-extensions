@@ -11,9 +11,9 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSetPreference
@@ -32,7 +32,7 @@ import java.util.Date
 import java.util.Locale
 
 class Cineby :
-    AnimeHttpSource(),
+    AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
     override val name = "Cineby"
@@ -45,7 +45,7 @@ class Cineby :
         get() = preferences.domainPref
 
     // Cineby/Videasy proxy
-    private val apiUrl = "https://db.wingsdatabase.com/3"
+    private val apiUrl = "https://db.speedracelight.com/3"
 
     private fun apiOrigin(url: String): String = url.toHttpUrl().run { "$scheme://$host" }
 
@@ -632,6 +632,6 @@ class Cineby :
 
         private const val PREF_SERVERS_KEY = "pref_servers_v2"
         private val PREF_SERVERS_DEFAULT =
-            setOf("Jett", "Neon", "Yoru", "Tejo")
+            setOf("Yoru", "Cypher", "Breach", "Neon", "Vyse")
     }
 }

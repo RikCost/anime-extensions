@@ -1,13 +1,17 @@
 package eu.kanade.tachiyomi.animeextension.en.animepahe
 
 import eu.kanade.tachiyomi.animesource.model.Video
-import fi.iki.elonen.NanoHTTPD
-import fi.iki.elonen.NanoHTTPD.Response.Status
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.nanohttpd.protocols.http.IHTTPSession
+import org.nanohttpd.protocols.http.NanoHTTPD
+import org.nanohttpd.protocols.http.response.Response
+import org.nanohttpd.protocols.http.response.Response.newChunkedResponse
+import org.nanohttpd.protocols.http.response.Response.newFixedLengthResponse
+import org.nanohttpd.protocols.http.response.Status
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.IOException
@@ -52,8 +56,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         this.client = client
         ensureStarted()
         return videos.map { video ->
-            if (video.url.contains(".m3u8", ignoreCase = true)) {
-                video.copyWithLocalUrl(createLocalM3u8Url(video.url))
+            if (video.videoUrl.contains(".m3u8", ignoreCase = true)) {
+                video.copyWithLocalUrl(createLocalM3u8Url(video.videoUrl))
             } else {
                 video
             }
@@ -64,13 +68,13 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         mp4Client = client
         ensureStarted()
         return videos.map { video ->
-            val localUrl = createLocalMp4Url(video.url)
-            mp4Headers[video.url] = video.headers ?: Headers.Builder().build()
+            val localUrl = createLocalMp4Url(video.videoUrl)
+            mp4Headers[video.videoUrl] = video.headers ?: Headers.Builder().build()
             video.copyWithLocalMp4Url(localUrl)
         }
     }
 
-    override fun serve(session: IHTTPSession): Response = when {
+    override fun handle(session: IHTTPSession): Response = when {
         session.uri.startsWith("/m3u8") -> handleM3u8Request(session)
         session.uri.startsWith("/segment") -> handleSegmentRequest(session)
         session.uri.startsWith("/mp4") -> handleMp4Request(session)
@@ -118,10 +122,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
             val status = Status.lookup(upstream.code) ?: Status.OK
             val stream = object : FilterInputStream(body.byteStream()) {
                 override fun close() {
-                    try {
+                    upstream.use { _ ->
                         super.close()
-                    } finally {
-                        upstream.close()
                     }
                 }
             }
@@ -159,8 +161,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
 
     private fun Video.copyWithLocalUrl(localUrl: String): Video = Video(
         videoUrl = localUrl,
-        url = url,
-        quality = quality,
+        url = videoUrl,
+        quality = videoTitle,
         subtitleTracks = subtitleTracks,
         audioTracks = audioTracks,
         headers = headers,
@@ -169,7 +171,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
     private fun Video.copyWithLocalMp4Url(localUrl: String): Video = Video(
         videoUrl = localUrl,
         url = localUrl,
-        quality = quality,
+        quality = videoTitle,
         subtitleTracks = subtitleTracks,
         audioTracks = audioTracks,
         headers = headers,
@@ -241,7 +243,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         val baseHttpUrl = originalUrl.toHttpUrlOrNull()
         val modifiedLines = mutableListOf<String>()
         var mediaSequence = 0L
-        var segmentSequence = mediaSequence
+        var segmentSequence = 0L
         var currentKey: HlsKey? = null
 
         content.lines().forEach { line ->
