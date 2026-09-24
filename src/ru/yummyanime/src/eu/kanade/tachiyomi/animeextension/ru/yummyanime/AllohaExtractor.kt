@@ -38,7 +38,7 @@ import java.util.concurrent.TimeUnit
  * another origin, making it cross-origin from the wrapper page), the extractor
  * falls back to the Playerjs postMessage API, which works across origins.
  *
- * This extractor is intended to be called lazily from `fetchVideoUrl` (i.e. when
+ * This extractor is intended to be called lazily from `resolveVideo` (i.e. when
  * the user actually starts playback), not for every dubbing while building the
  * video list — a WebView round-trip takes 5-25 seconds. Up to
  * [MAX_PARALLEL_EXTRACTIONS] extractions run concurrently (the app batch-resolves
