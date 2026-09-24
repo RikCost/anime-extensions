@@ -23,11 +23,11 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
-import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
+import keiyoushi.network.rateLimit
+import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.LazyMutable
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSwitchPreference
@@ -59,7 +59,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 class Miruro :
-    AnimeHttpSource(),
+    AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
     override val name = "Miruro.tv"
@@ -835,6 +835,7 @@ class Miruro :
         private val PREF_MIRROR_DEFAULT = DEFAULT_MIRROR_VALUES.first()
         private const val PREF_CACHED_MIRRORS_KEY = "cached_mirrors_json"
         private const val STATUS_PAGE_API_URL = "https://status.miruro.com/api"
+        private val STATUS_PAGE_API_HOST = STATUS_PAGE_API_URL.toHttpUrl().host
 
         private val BR_REGEX = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE)
         private val CLOSE_P_REGEX = Regex("</p>", RegexOption.IGNORE_CASE)
@@ -845,8 +846,8 @@ class Miruro :
         val SUB_TYPE_DISPLAY_ORDER = listOf("sub", "dub", "ssub", "h-sub")
     }
 
-    private val statusPageClient: OkHttpClient = network.client.newBuilder()
-        .rateLimitHost("$STATUS_PAGE_API_URL/".toHttpUrl(), permits = 1, period = 2.seconds)
+    private val statusPageClient = network.client.newBuilder()
+        .rateLimit(1, 2.seconds) { it.host == STATUS_PAGE_API_HOST }
         .build()
 
     // ============================== Pipe Search ==============================
@@ -1785,7 +1786,7 @@ class Miruro :
         return videos
     }
 
-    override fun List<Video>.sort(): List<Video> {
+    override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.preferredQuality
         val subTypeLabel = formatSubTypeLabel(preferences.preferredSubType)
         val providerName = providerDisplayName(preferences.preferredProvider)
@@ -1796,7 +1797,7 @@ class Miruro :
         var working: List<Video> = this
 
         if (!includeAllProviders) {
-            val providerFiltered = working.filter { it.quality.contains(providerName) }
+            val providerFiltered = working.filter { it.videoTitle.contains(providerName) }
             if (providerFiltered.isNotEmpty()) {
                 logD { "video.sort: provider filter: ${working.size} → ${providerFiltered.size} (preferred=$providerName)" }
                 working = providerFiltered
@@ -1806,8 +1807,8 @@ class Miruro :
         }
 
         val filtered: List<Video> = when (streamTypePref) {
-            "hls" -> working.filter { it.quality.contains("HLS") }
-            "embed" -> working.filter { it.quality.contains("EMBED") }
+            "hls" -> working.filter { it.videoTitle.contains("HLS") }
+            "embed" -> working.filter { it.videoTitle.contains("EMBED") }
             else -> working
         }
 
@@ -1817,16 +1818,16 @@ class Miruro :
         }
 
         val sorted = filtered.sortedWith(
-            compareByDescending<Video> { it.quality.contains("HLS") }
-                .thenByDescending { it.quality.contains(providerName) }
-                .thenByDescending { it.quality.contains(subTypeLabel) }
+            compareByDescending<Video> { it.videoTitle.contains("HLS") }
+                .thenByDescending { it.videoTitle.contains(providerName) }
+                .thenByDescending { it.videoTitle.contains(subTypeLabel) }
                 .thenByDescending {
-                    val q = QUALITY_REGEX.find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val q = QUALITY_REGEX.find(it.videoTitle)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                     when {
                         qualityInt == 0 -> q
                         q == qualityInt -> 100000
                         q > 0 -> q
-                        it.quality.contains(quality) -> 99999
+                        it.videoTitle.contains(quality) -> 99999
                         else -> 0
                     }
                 },
