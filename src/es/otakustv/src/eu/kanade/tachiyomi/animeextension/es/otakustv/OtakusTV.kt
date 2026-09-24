@@ -13,8 +13,8 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.useAsJsoup
 import okhttp3.Headers
@@ -24,7 +24,7 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class OtakusTV : ParsedAnimeHttpSource() {
+class OtakusTV : ParsedAnimeHttpLegacySource() {
 
     override val name = "OtakusTV"
 
@@ -109,7 +109,7 @@ class OtakusTV : ParsedAnimeHttpSource() {
 
     private fun animeFromElement(element: Element): SAnime = SAnime.create().apply {
         val link = element.selectFirst("a[href*=/anime/]") ?: element.selectFirst("a")!!
-        setUrlWithoutDomain(link.attr("abs:href"))
+        setUrlWithoutDomain(link.attr("href"))
         val img = element.selectFirst("img")
         title = img?.attr("alt").orEmpty()
             .ifBlank { link.attr("title").cleanTitle() }
@@ -204,7 +204,6 @@ class OtakusTV : ParsedAnimeHttpSource() {
 
     override fun videoListSelector() = throw UnsupportedOperationException()
     override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
-    override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
     override fun episodeListSelector() = throw UnsupportedOperationException()
     override fun episodeFromElement(element: Element) = throw UnsupportedOperationException()
 
