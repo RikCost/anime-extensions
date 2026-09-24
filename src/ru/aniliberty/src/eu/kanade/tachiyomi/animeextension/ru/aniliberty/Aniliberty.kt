@@ -8,9 +8,9 @@ import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
@@ -22,7 +22,7 @@ import okhttp3.Request
 import okhttp3.Response
 
 class Aniliberty :
-    AnimeHttpSource(),
+    AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
     override val name = "AniLiberty"
@@ -157,14 +157,14 @@ class Aniliberty :
             ep.hls1080?.let { Video(it, "1080p", it, headers = videoHeaders) },
             ep.hls720?.let { Video(it, "720p", it, headers = videoHeaders) },
             ep.hls480?.let { Video(it, "480p", it, headers = videoHeaders) },
-        ).sort()
+        ).sortVideos()
     }
 
     override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
 
-    override fun List<Video>.sort(): List<Video> {
+    override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
-        return sortedByDescending { it.quality.contains(quality) }
+        return sortedByDescending { it.videoTitle.contains(quality) }
     }
 
     // ─── Mappers ──────────────────────────────────────────────────────────────
