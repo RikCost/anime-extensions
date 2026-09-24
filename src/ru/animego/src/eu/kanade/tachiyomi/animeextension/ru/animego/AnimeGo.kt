@@ -9,6 +9,7 @@ import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -17,7 +18,6 @@ import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
@@ -260,7 +260,10 @@ class AnimeGo :
 
     // =============================== Videos ===============================
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    // One Hoster per translation/dubbing so that switching the audio track in the player
+    // actually switches the stream: the app switches hosters, while the videos inside a
+    // hoster are just the qualities of that one dubbing.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val requestUrl = episode.url.toHttpUrl()
         val episodeNum = requestUrl.queryParameter("episode")?.toIntOrNull()
         val isSerial = requestUrl.encodedPath.startsWith("/serial/")
@@ -271,42 +274,39 @@ class AnimeGo :
             "div.serial-translations-box option, div.movie-translations-box option",
         )
 
-        val videos = if (translations.isEmpty()) {
-            // Single translation — the fetched page itself is the player page.
-            kodikVideoLinks(requestUrl.toString(), "Kodik")
-        } else {
-            translations.parallelCatchingFlatMap { option ->
-                val mediaId = option.attr("data-media-id")
-                val mediaHash = option.attr("data-media-hash")
-                if (mediaId.isBlank() || mediaHash.isBlank()) return@parallelCatchingFlatMap emptyList()
-
-                // Skip translations that do not have the requested episode yet.
-                val epCount = EP_COUNT_REGEX.find(option.text())?.groupValues?.get(1)?.toIntOrNull()
-                if (episodeNum != null && epCount != null && epCount < episodeNum) {
-                    return@parallelCatchingFlatMap emptyList()
-                }
-
-                val dubbing = option.text().substringBefore(" (").trim().ifBlank { "Kodik" }
-                val label = if (option.attr("data-translation-type") == "subtitles") {
-                    "$dubbing (Субтитры)"
-                } else {
-                    dubbing
-                }
-
-                val mediaType = if (isSerial) "serial" else "video"
-                val episodeQuery = if (isSerial && episodeNum != null) "?episode=$episodeNum" else ""
-                val url = "https://$playerHost/$mediaType/$mediaId/$mediaHash/720p$episodeQuery"
-
-                kodikVideoLinks(url, label)
-            }
+        // Single translation — the episode URL itself is the player page.
+        if (translations.isEmpty()) {
+            return listOf(Hoster(hosterName = "Kodik", internalData = episode.url))
         }
 
-        return applyQualityPreference(videos).sortVideos()
+        return translations.mapNotNull { option ->
+            val mediaId = option.attr("data-media-id")
+            val mediaHash = option.attr("data-media-hash")
+            if (mediaId.isBlank() || mediaHash.isBlank()) return@mapNotNull null
+
+            // Skip translations that do not have the requested episode yet.
+            val epCount = EP_COUNT_REGEX.find(option.text())?.groupValues?.get(1)?.toIntOrNull()
+            if (episodeNum != null && epCount != null && epCount < episodeNum) return@mapNotNull null
+
+            val dubbing = option.text().substringBefore(" (").trim().ifBlank { "Kodik" }
+            val label = if (option.attr("data-translation-type") == "subtitles") {
+                "$dubbing (Субтитры)"
+            } else {
+                dubbing
+            }
+
+            val mediaType = if (isSerial) "serial" else "video"
+            val episodeQuery = if (isSerial && episodeNum != null) "?episode=$episodeNum" else ""
+            val url = "https://$playerHost/$mediaType/$mediaId/$mediaHash/720p$episodeQuery"
+
+            Hoster(hosterName = label, internalData = url)
+        }
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = applyQualityPreference(kodikVideoLinks(hoster.internalData, hoster.hosterName))
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    // Voice-overs before subtitles now applies to the hoster (audio track) list.
+    override fun List<Hoster>.sortHosters(): List<Hoster> = sortedBy { it.hosterName.contains("Субтитры", ignoreCase = true) }
 
     // Keep only the quality selected in the extension settings; if it is not available,
     // fall back to the closest one (ties prefer the higher quality). Videos whose quality
