@@ -214,6 +214,7 @@ class AnimeGo :
         val document = response.asJsoup()
         val iframeSrc = document.selectFirst("iframe[data-src*=kodik], iframe[src*=kodik]")
             ?.let { it.attr("data-src").ifBlank { it.attr("src") } }
+            ?.takeIf { it.isNotBlank() }
             ?: throw Exception("Плеер Kodik не найден на странице")
 
         val playerUrl = iframeSrc.fixProtocol()
@@ -240,8 +241,9 @@ class AnimeGo :
             .mapNotNull { EP_COUNT_REGEX.find(it.text())?.groupValues?.get(1)?.toIntOrNull() }
             .maxOrNull() ?: 0
 
-        val total = maxOf(fromSeriesBox, fromTranslations)
-        if (total == 0) throw Exception("Не удалось получить список серий")
+        // Fall back to a single episode when the page exposes no dropdowns (movies,
+        // single-episode serials, newly airing shows).
+        val total = maxOf(fromSeriesBox, fromTranslations).coerceAtLeast(1)
 
         return (total downTo 1).map { ep ->
             SEpisode.create().apply {
@@ -433,7 +435,7 @@ class AnimeGo :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
+                client.newCall(GET(scriptUrl, kodikHeaders)).execute().use { it.body.string() }
             }.getOrNull() ?: return emptyList()
         }
 
