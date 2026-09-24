@@ -20,6 +20,8 @@ import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -279,6 +281,13 @@ class AnimeGo :
             return listOf(Hoster(hosterName = "Kodik", internalData = episode.url))
         }
 
+        // Carry the signed urlParams over so Kodik actually serves the requested dubbing:
+        // without them the media id/hash in the path are ignored and the first dubbing wins.
+        val pageHtml = document.html()
+        val rawParams = Regex("""urlParams\s*=\s*'([^']+)'""").find(pageHtml)?.groupValues?.get(1)
+            ?: Regex("""urlParams\s*=\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
+        val signQuery = rawParams?.let(::urlParamsToQuery).orEmpty()
+
         return translations.mapNotNull { option ->
             val mediaId = option.attr("data-media-id")
             val mediaHash = option.attr("data-media-hash")
@@ -296,12 +305,24 @@ class AnimeGo :
             }
 
             val mediaType = if (isSerial) "serial" else "video"
-            val episodeQuery = if (isSerial && episodeNum != null) "?episode=$episodeNum" else ""
-            val url = "https://$playerHost/$mediaType/$mediaId/$mediaHash/720p$episodeQuery"
+            val params = listOfNotNull(
+                signQuery.takeIf { it.isNotEmpty() },
+                if (isSerial && episodeNum != null) "episode=$episodeNum" else null,
+            ).joinToString("&")
+            val url = buildString {
+                append("https://$playerHost/$mediaType/$mediaId/$mediaHash/720p")
+                if (params.isNotEmpty()) append("?$params")
+            }
 
             Hoster(hosterName = label, internalData = url)
         }
     }
+
+    private fun urlParamsToQuery(raw: String): String = runCatching {
+        json.parseToJsonElement(raw).jsonObject.entries.joinToString("&") { (key, value) ->
+            "$key=${value.jsonPrimitive.content}"
+        }
+    }.getOrDefault("")
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> = applyQualityPreference(kodikVideoLinks(hoster.internalData, hoster.hosterName))
 
