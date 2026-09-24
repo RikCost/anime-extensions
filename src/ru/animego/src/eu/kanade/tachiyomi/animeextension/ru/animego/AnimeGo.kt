@@ -12,10 +12,10 @@ import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
-import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
@@ -33,7 +33,7 @@ import org.jsoup.nodes.Element
 import uy.kohesive.injekt.injectLazy
 
 class AnimeGo :
-    ParsedAnimeHttpSource(),
+    ParsedAnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
     override val name = "AnimeGO"
@@ -299,14 +299,12 @@ class AnimeGo :
             }
         }
 
-        return applyQualityPreference(videos).sort()
+        return applyQualityPreference(videos).sortVideos()
     }
 
     override fun videoListSelector(): String = throw UnsupportedOperationException()
 
     override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
-
-    override fun videoUrlParse(document: Document): String = throw UnsupportedOperationException()
 
     // Keep only the quality selected in the extension settings; if it is not available,
     // fall back to the closest one (ties prefer the higher quality). Videos whose quality
@@ -314,19 +312,19 @@ class AnimeGo :
     private fun applyQualityPreference(videos: List<Video>): List<Video> {
         val pref = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!.toIntOrNull()
             ?: return videos
-        val available = videos.mapNotNull { it.quality.parseQuality() }.distinct()
+        val available = videos.mapNotNull { it.videoTitle.parseQuality() }.distinct()
         if (available.isEmpty()) return videos
         val target = available.minWithOrNull(
             compareBy({ kotlin.math.abs(it - pref) }, { -it }),
         ) ?: return videos
-        return videos.filter { video -> video.quality.parseQuality()?.let { it == target } ?: true }
+        return videos.filter { video -> video.videoTitle.parseQuality()?.let { it == target } ?: true }
     }
 
     private fun String.parseQuality(): Int? = QUALITY_REGEX.find(this)?.groupValues?.get(1)?.toIntOrNull()
 
     // Voice-overs before subtitles.
-    override fun List<Video>.sort(): List<Video> = sortedBy {
-        it.quality.contains("Субтитры", ignoreCase = true)
+    override fun List<Video>.sortVideos(): List<Video> = sortedBy {
+        it.videoTitle.contains("Субтитры", ignoreCase = true)
     }
 
     // ─── Kodik player ─────────────────────────────────────────────────────
