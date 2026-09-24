@@ -23,9 +23,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -80,15 +78,21 @@ class JutsuTv :
             if (query.length < 4) throw Exception("Минимальная длина поискового запроса — 4 символа")
 
             val postHeaders = headers.newBuilder()
-                .add("Content-Type", "application/x-www-form-urlencoded")
                 .add("Origin", baseUrl)
                 .build()
 
-            val body = buildString {
-                append("do=search&subaction=search")
-                if (page > 1) append("&search_start=$page&full_search=0&result_from=${(page - 1) * 10 + 1}")
-                append("&story=${Uri.encode(query)}")
-            }.toRequestBody("application/x-www-form-urlencoded".toMediaType())
+            val body = FormBody.Builder()
+                .add("do", "search")
+                .add("subaction", "search")
+                .apply {
+                    if (page > 1) {
+                        add("search_start", page.toString())
+                        add("full_search", "0")
+                        add("result_from", ((page - 1) * 10 + 1).toString())
+                    }
+                }
+                .add("story", query)
+                .build()
 
             return if (page == 1) {
                 POST("$baseUrl/", body = body, headers = postHeaders)
@@ -284,11 +288,13 @@ class JutsuTv :
         val total = maxOf(fromSeriesBox, fromTranslations)
         if (total == 0) throw Exception("Не удалось получить список серий")
 
+        val separator = if (playerUrl.contains("?")) "&" else "?"
+
         return (total downTo 1).map { ep ->
             SEpisode.create().apply {
                 name = "Серия $ep"
                 episode_number = ep.toFloat()
-                url = "$playerUrl?episode=$ep"
+                url = "$playerUrl${separator}episode=$ep"
             }
         }
     }
@@ -476,7 +482,7 @@ class JutsuTv :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
+                client.newCall(GET(scriptUrl, kodikHeaders)).execute().use { it.body.string() }
             }.getOrNull() ?: return emptyList()
         }
 
