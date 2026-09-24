@@ -128,7 +128,7 @@ class OtakusTV : ParsedAnimeHttpLegacySource() {
         // The plot synopsis lives in a ".tx" block. Its ".tx.sp" sibling is SEO boilerplate
         // about the site, and og:description is an SEO-prefixed, truncated copy — so prefer the
         // clean ".tx" text and only fall back to a trimmed og:description.
-        description = document.select(".tx").firstOrNull { !it.hasClass("sp") }?.text()?.trim()
+        description = document.selectFirst(".tx:not(.sp)")?.text()?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:description]")?.attr("content")
                 ?.substringAfter("OtakusTV.net")?.trim()
@@ -145,7 +145,7 @@ class OtakusTV : ParsedAnimeHttpLegacySource() {
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val document = response.useAsJsoup()
-        val slug = response.request.url.toString().substringAfterLast("/anime/").trimEnd('/')
+        val slug = response.request.url.encodedPath.trimEnd('/').substringAfterLast('/')
         val prefix = "$slug-"
 
         // The page also lists global "latest episodes", so we keep only links whose slug is
