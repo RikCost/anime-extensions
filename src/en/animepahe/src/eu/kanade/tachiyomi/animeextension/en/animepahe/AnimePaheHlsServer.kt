@@ -56,8 +56,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         this.client = client
         ensureStarted()
         return videos.map { video ->
-            if (video.url.contains(".m3u8", ignoreCase = true)) {
-                video.copyWithLocalUrl(createLocalM3u8Url(video.url))
+            if (video.videoUrl.contains(".m3u8", ignoreCase = true)) {
+                video.copyWithLocalUrl(createLocalM3u8Url(video.videoUrl))
             } else {
                 video
             }
@@ -68,8 +68,8 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         mp4Client = client
         ensureStarted()
         return videos.map { video ->
-            val localUrl = createLocalMp4Url(video.url)
-            mp4Headers[video.url] = video.headers ?: Headers.Builder().build()
+            val localUrl = createLocalMp4Url(video.videoUrl)
+            mp4Headers[video.videoUrl] = video.headers ?: Headers.Builder().build()
             video.copyWithLocalMp4Url(localUrl)
         }
     }
@@ -161,20 +161,36 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
 
     private fun Video.copyWithLocalUrl(localUrl: String): Video = Video(
         videoUrl = localUrl,
-        url = url,
-        quality = quality,
+        videoTitle = videoTitle,
+        resolution = resolution,
+        bitrate = bitrate,
+        headers = headers,
+        preferred = preferred,
         subtitleTracks = subtitleTracks,
         audioTracks = audioTracks,
-        headers = headers,
+        timestamps = timestamps,
+        mpvArgs = mpvArgs,
+        ffmpegStreamArgs = ffmpegStreamArgs,
+        ffmpegVideoArgs = ffmpegVideoArgs,
+        internalData = internalData,
+        initialized = initialized,
     )
 
     private fun Video.copyWithLocalMp4Url(localUrl: String): Video = Video(
         videoUrl = localUrl,
-        url = localUrl,
-        quality = quality,
+        videoTitle = videoTitle,
+        resolution = resolution,
+        bitrate = bitrate,
+        headers = headers,
+        preferred = preferred,
         subtitleTracks = subtitleTracks,
         audioTracks = audioTracks,
-        headers = headers,
+        timestamps = timestamps,
+        mpvArgs = mpvArgs,
+        ffmpegStreamArgs = ffmpegStreamArgs,
+        ffmpegVideoArgs = ffmpegVideoArgs,
+        internalData = internalData,
+        initialized = initialized,
     )
 
     private fun extractHeadersFromSession(session: IHTTPSession): Headers = Headers.Builder().apply {
@@ -324,7 +340,7 @@ object AnimePaheHlsServer : NanoHTTPD(0) {
         }
 
         return try {
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            val cipher = Cipher.getInstance("AES/CBC/NoPadding")
             cipher.init(
                 Cipher.DECRYPT_MODE,
                 SecretKeySpec(key, "AES"),
