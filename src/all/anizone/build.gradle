@@ -1,7 +1,9 @@
 ext {
     extName = 'AniZone'
     extClass = '.AniZone'
-    extVersionCode = 10
+    libVersion = 16
+    extVersionCode = 14
+    isNsfw = false
 }
 
 apply plugin: "kei.plugins.extension.legacy"
