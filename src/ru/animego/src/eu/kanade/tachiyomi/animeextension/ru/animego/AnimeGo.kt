@@ -374,7 +374,7 @@ class AnimeGo :
         return Jsoup.parse(body.replace(SELF_CLOSING_SCRIPT_REGEX, "<script$1></script>"), url)
     }
 
-    private fun kodikVideoLinks(playerPageUrl: String, dubbing: String): List<Video> {
+    private suspend fun kodikVideoLinks(playerPageUrl: String, dubbing: String): List<Video> {
         val page = runCatching {
             fetchKodikDocument(playerPageUrl)
         }.getOrNull() ?: return emptyList()
@@ -458,7 +458,7 @@ class AnimeGo :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.newCall(GET(scriptUrl, kodikHeaders)).execute().use { it.body.string() }
+                client.get(scriptUrl, kodikHeaders).body.string()
             }.getOrNull() ?: return emptyList()
         }
 
