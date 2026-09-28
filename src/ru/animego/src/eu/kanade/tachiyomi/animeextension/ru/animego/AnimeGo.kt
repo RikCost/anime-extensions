@@ -9,14 +9,16 @@ import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonObject
@@ -33,7 +35,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class AnimeGo :
-    ParsedAnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val name = "AnimeGO"
@@ -50,26 +52,29 @@ class AnimeGo :
 
     override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/page/$page/", headers)
 
-    override fun popularAnimeSelector(): String = "div.item-main"
+    private fun popularAnimeSelector(): String = "div.item-main"
 
-    override fun popularAnimeNextPageSelector(): String = "div.pagination__pages span:not(.nav_ext) + a"
+    private fun popularAnimeNextPageSelector(): String = "div.pagination__pages span:not(.nav_ext) + a"
 
-    override fun popularAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
+    private fun popularAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
         val link = element.selectFirst("a.item-main__title")!!
         setUrlWithoutDomain(link.attr("href"))
         title = link.text()
         thumbnail_url = element.selectFirst("div.item__img img")?.absUrl("src")
     }
 
+    override fun popularAnimeParse(response: Response): AnimesPage {
+        val document = response.asJsoup()
+        val animes = document.select(popularAnimeSelector()).map { popularAnimeFromElement(it) }
+        val hasNextPage = document.selectFirst(popularAnimeNextPageSelector()) != null
+        return AnimesPage(animes, hasNextPage)
+    }
+
     // =============================== Latest ===============================
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/ongoing/page/$page/", headers)
 
-    override fun latestUpdatesSelector(): String = popularAnimeSelector()
-
-    override fun latestUpdatesNextPageSelector(): String = popularAnimeNextPageSelector()
-
-    override fun latestUpdatesFromElement(element: Element): SAnime = popularAnimeFromElement(element)
+    override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     // =============================== Search ===============================
 
@@ -106,11 +111,7 @@ class AnimeGo :
         }
     }
 
-    override fun searchAnimeSelector(): String = popularAnimeSelector()
-
-    override fun searchAnimeNextPageSelector(): String = popularAnimeNextPageSelector()
-
-    override fun searchAnimeFromElement(element: Element): SAnime = popularAnimeFromElement(element)
+    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     // ============================== Filters ===============================
 
@@ -185,33 +186,40 @@ class AnimeGo :
 
     // =========================== Anime Details ============================
 
-    override fun animeDetailsParse(document: Document): SAnime = SAnime.create().apply {
-        title = document.selectFirst("h1.item-page__title")?.text()
-            ?: throw Exception("Название не найдено")
-        thumbnail_url = document.selectFirst("div.item-page__poster img")?.absUrl("src")
-        description = document.selectFirst("div.full-text")?.text()
-        genre = document.select("div.item-page ul.item__list li:has(span:contains(Жанр)) a")
-            .joinToString { it.text() }
-        author = document.select("div.item-page ul.item__list li:has(span:contains(Студия)) a")
-            .joinToString { it.text() }
-            .ifBlank { null }
-        val statusText = document.selectFirst("div.item-page ul.item__list li:has(span:contains(Статус))")
-            ?.text() ?: ""
-        status = when {
-            statusText.contains("Онгоинг", ignoreCase = true) -> SAnime.ONGOING
-            // Aniyomi has no dedicated "announced" status — the closest one is ONGOING.
-            statusText.contains("Анонс", ignoreCase = true) -> SAnime.ONGOING
-            // «Заверш» покрывает оба написания: «Завершён» и «Завершен».
-            statusText.contains("Заверш", ignoreCase = true) -> SAnime.COMPLETED
-            statusText.contains("Вышел", ignoreCase = true) -> SAnime.COMPLETED
-            else -> SAnime.UNKNOWN
+    override fun animeDetailsParse(response: Response): SAnime {
+        val document = response.asJsoup()
+        return SAnime.create().apply {
+            title = document.selectFirst("h1.item-page__title")?.text()
+                ?: throw Exception("Название не найдено")
+            thumbnail_url = document.selectFirst("div.item-page__poster img")?.absUrl("src")
+            description = document.selectFirst("div.full-text")?.text()
+            genre = document.select("div.item-page ul.item__list li:has(span:contains(Жанр)) a")
+                .joinToString { it.text() }
+            author = document.select("div.item-page ul.item__list li:has(span:contains(Студия)) a")
+                .joinToString { it.text() }
+                .ifBlank { null }
+            val statusText = document.selectFirst("div.item-page ul.item__list li:has(span:contains(Статус))")
+                ?.text() ?: ""
+            status = when {
+                statusText.contains("Онгоинг", ignoreCase = true) -> SAnime.ONGOING
+                // Aniyomi has no dedicated "announced" status — the closest one is ONGOING.
+                statusText.contains("Анонс", ignoreCase = true) -> SAnime.ONGOING
+                // «Заверш» покрывает оба написания: «Завершён» и «Завершен».
+                statusText.contains("Заверш", ignoreCase = true) -> SAnime.COMPLETED
+                statusText.contains("Вышел", ignoreCase = true) -> SAnime.COMPLETED
+                else -> SAnime.UNKNOWN
+            }
         }
     }
 
     // ============================== Episodes ==============================
+    // Fetched via getEpisodeList below (suspend network calls can't live in episodeListParse).
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.asJsoup()
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val document = client.get(baseUrl + anime.url, headers).use { it.asJsoup() }
         val iframeSrc = document.selectFirst("iframe[data-src*=kodik], iframe[src*=kodik]")
             ?.let { it.attr("data-src").ifBlank { it.attr("src") } }
             ?.takeIf { it.isNotBlank() }
@@ -253,10 +261,6 @@ class AnimeGo :
             }
         }
     }
-
-    override fun episodeListSelector(): String = throw UnsupportedOperationException()
-
-    override fun episodeFromElement(element: Element): SEpisode = throw UnsupportedOperationException()
 
     // =============================== Videos ===============================
 

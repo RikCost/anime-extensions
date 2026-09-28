@@ -1,6 +1,7 @@
 ext {
     extName = 'AnimeGO.studio'
     extClass = '.AnimeGo'
+    libVersion = 16
     extVersionCode = 1
     isNsfw = false
 }
