@@ -186,7 +186,8 @@ class AnimeGo :
     // =========================== Anime Details ============================
 
     override fun animeDetailsParse(document: Document): SAnime = SAnime.create().apply {
-        title = document.selectFirst("h1.item-page__title")?.text() ?: ""
+        title = document.selectFirst("h1.item-page__title")?.text()
+            ?: throw Exception("Название не найдено")
         thumbnail_url = document.selectFirst("div.item-page__poster img")?.absUrl("src")
         description = document.selectFirst("div.full-text")?.text()
         genre = document.select("div.item-page ul.item__list li:has(span:contains(Жанр)) a")
