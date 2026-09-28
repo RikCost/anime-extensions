@@ -19,8 +19,7 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -32,7 +31,6 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import uy.kohesive.injekt.injectLazy
 
 class AnimeGo :
     ParsedAnimeHttpLegacySource(),
@@ -43,7 +41,6 @@ class AnimeGo :
     override val lang = "ru"
     override val supportsLatest = true
 
-    private val json: Json by injectLazy()
     private val preferences by getPreferencesLazy()
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
@@ -319,7 +316,7 @@ class AnimeGo :
     }
 
     private fun urlParamsToQuery(raw: String): String = runCatching {
-        json.parseToJsonElement(raw).jsonObject.entries.joinToString("&") { (key, value) ->
+        raw.parseAs<JsonObject>().entries.joinToString("&") { (key, value) ->
             "$key=${value.jsonPrimitive.content}"
         }
     }.getOrDefault("")
@@ -385,7 +382,7 @@ class AnimeGo :
             ?: return emptyList()
 
         val formData = runCatching {
-            json.decodeFromString(KodikFormData.serializer(), rawParams)
+            rawParams.parseAs<KodikFormData>()
         }.getOrNull() ?: return emptyList()
 
         if (formData.dSign.isEmpty()) return emptyList()
