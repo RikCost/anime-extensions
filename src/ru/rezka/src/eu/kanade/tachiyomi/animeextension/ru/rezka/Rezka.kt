@@ -50,17 +50,12 @@ class Rezka :
             return if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
         }
 
-    private val userAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/124.0.0.0 Safari/537.36"
-
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("User-Agent", userAgent)
+    // No hardcoded User-Agent: the tracker is not behind Cloudflare, and the app's default one
+    // already is a browser UA. `super.headersBuilder()` keeps it, so it also stays current.
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    private fun ajaxHeaders(): Headers = Headers.Builder()
-        .add("User-Agent", userAgent)
-        .add("Referer", "$baseUrl/")
+    private fun ajaxHeaders(): Headers = headers.newBuilder()
         .add("Origin", baseUrl)
         .add("X-Requested-With", "XMLHttpRequest")
         .build()
@@ -212,12 +207,12 @@ class Rezka :
             .useAsJsoup()
         val html = document.html()
 
-        val postId = Regex("""initCDN(?:Movies|Series)Events\((\d+)""").find(html)?.groupValues?.get(1)
+        val postId = POST_ID_REGEX.find(html)?.groupValues?.get(1)
             ?: document.selectFirst("#post_id")?.attr("value")
             ?: titlePath.trimStart('/').substringBefore('-').takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
             ?: return emptyList()
 
-        val favs = Regex("""['"]?favs['"]?\s*[:=]\s*['"]([a-f0-9-]+)['"]""").find(html)?.groupValues?.get(1)
+        val favs = FAVS_REGEX.find(html)?.groupValues?.get(1)
             ?: document.selectFirst("#ctrl_favs")?.attr("value")
             ?: ""
 
@@ -243,11 +238,11 @@ class Rezka :
             val cdnUrl = "$baseUrl/ajax/get_cdn_series/?t=${System.currentTimeMillis()}"
             val json = client.newCall(POST(cdnUrl, ajaxHeaders(), body)).awaitSuccess().use { it.body.string() }
 
-            val encoded = Regex(""""url"\s*:\s*"(.*?[^\\])"""").find(json)?.groupValues?.get(1)
+            val encoded = CDN_URL_REGEX.find(json)?.groupValues?.get(1)
                 ?.replace("\\/", "/")?.decodeJsonUnicode()
                 ?: return@parallelCatchingFlatMap emptyList()
 
-            val subtitleTracks = Regex(""""subtitle"\s*:\s*"(.*?[^\\])"""").find(json)?.groupValues?.get(1)
+            val subtitleTracks = SUBTITLE_REGEX.find(json)?.groupValues?.get(1)
                 ?.replace("\\/", "/")?.decodeJsonUnicode()
                 ?.let(::parseSubtitles)
                 ?: emptyList()
@@ -293,7 +288,7 @@ class Rezka :
             }
         }
         // Single translator — read the default id from the player init call.
-        val defaultId = Regex("""initCDN(?:Movies|Series)Events\(\d+,\s*(\d+)""")
+        val defaultId = DEFAULT_TRANSLATOR_ID_REGEX
             .find(html)?.groupValues?.get(1) ?: "0"
         return listOf("По умолчанию" to defaultId)
     }
@@ -319,9 +314,9 @@ class Rezka :
 
     // The CDN response is consumed as a raw string, so \uXXXX escapes (e.g. Cyrillic subtitle
     // language names) stay literal. Decode them to real characters.
-    private fun String.decodeJsonUnicode(): String = Regex("""\\u([0-9a-fA-F]{4})""").replace(this) { it.groupValues[1].toInt(16).toChar().toString() }
+    private fun String.decodeJsonUnicode(): String = JSON_UNICODE_ESCAPE_REGEX.replace(this) { it.groupValues[1].toInt(16).toChar().toString() }
 
-    private fun parseSubtitles(data: String): List<Track> = Regex("""\[([^\]]+)]([^,\[]+)""").findAll(data).mapNotNull { match ->
+    private fun parseSubtitles(data: String): List<Track> = SUBTITLE_TRACK_REGEX.findAll(data).mapNotNull { match ->
         val lang = match.groupValues[1].trim()
         val url = match.groupValues[2].trim()
         val normalized = if (url.startsWith("//")) "https:$url" else url
@@ -460,6 +455,13 @@ class Rezka :
 
     companion object {
         private val qualityRegex = Regex("""(\d{3,4})\s*[pр]""")
+        private val POST_ID_REGEX = Regex("""initCDN(?:Movies|Series)Events\((\d+)""")
+        private val DEFAULT_TRANSLATOR_ID_REGEX = Regex("""initCDN(?:Movies|Series)Events\(\d+,\s*(\d+)""")
+        private val FAVS_REGEX = Regex("""['"]?favs['"]?\s*[:=]\s*['"]([a-f0-9-]+)['"]""")
+        private val CDN_URL_REGEX = Regex(""""url"\s*:\s*"(.*?[^\\])"""")
+        private val SUBTITLE_REGEX = Regex(""""subtitle"\s*:\s*"(.*?[^\\])"""")
+        private val JSON_UNICODE_ESCAPE_REGEX = Regex("""\\u([0-9a-fA-F]{4})""")
+        private val SUBTITLE_TRACK_REGEX = Regex("""\[([^\]]+)]([^,\[]+)""")
         private const val PREF_DOMAIN_KEY = "pref_domain_v2"
         private const val PREF_DOMAIN_DEFAULT = "https://hdrezka.me"
         private const val PREF_CUSTOM_DOMAIN_KEY = "pref_custom_domain"
