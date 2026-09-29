@@ -103,11 +103,12 @@ class Animelib :
                 builder.header("Referer", "https://$domain/")
                 builder.header("Origin", "https://$domain")
             }
-            // Additional headers for API requests to bypass simple bot protections
+            // Additional headers for API requests. No explicit User-Agent: the app's default
+            // one is a full browser UA, whereas the bare "Mozilla/5.0 (Android)" this used to
+            // send is the classic scraper signature that bot protection looks for.
             if (host == apiHost) {
                 builder.header("Accept", "application/json, text/plain, */*")
                 builder.header("X-Requested-With", "XMLHttpRequest")
-                builder.header("User-Agent", "Mozilla/5.0 (Android)")
             }
 
             val requestToProceed = builder.build()
@@ -159,7 +160,8 @@ class Animelib :
                 }
                 Toast.makeText(screen.context, text, Toast.LENGTH_LONG).show()
 
-                preferences.edit().putBoolean(key, value).commit()
+                preferences.edit().putBoolean(key, value).apply()
+                true
             }
         }.also(screen::addPreference)
 
@@ -441,7 +443,6 @@ class Animelib :
                 Headers.Builder().apply {
                     set("Referer", "$baseUrl/")
                     set("Origin", "https://$domain")
-                    set("User-Agent", "Mozilla/5.0 (Android)")
                 }.build(),
             )
             .build()
