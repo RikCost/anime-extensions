@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class KodikFormData(
+class KodikFormData(
     val d: String = "",
     @SerialName("d_sign") val dSign: String = "",
     val pd: String = "",
@@ -14,14 +14,14 @@ data class KodikFormData(
 )
 
 @Serializable
-data class KodikVideoInfo(val src: String)
+class KodikVideoInfo(val src: String)
 
 @Serializable
-data class KodikVideoQuality(
+class KodikVideoQuality(
     @SerialName("360") val ugly: List<KodikVideoInfo> = emptyList(),
     @SerialName("480") val bad: List<KodikVideoInfo> = emptyList(),
     @SerialName("720") val good: List<KodikVideoInfo> = emptyList(),
 )
 
 @Serializable
-data class KodikData(val links: KodikVideoQuality)
+class KodikData(val links: KodikVideoQuality)

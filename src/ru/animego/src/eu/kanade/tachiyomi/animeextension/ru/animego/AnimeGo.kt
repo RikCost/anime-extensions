@@ -18,6 +18,7 @@ import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.bodyString
 import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
@@ -286,9 +287,8 @@ class AnimeGo :
         // Carry the signed urlParams over so Kodik actually serves the requested dubbing:
         // without them the media id/hash in the path are ignored and the first dubbing wins.
         val pageHtml = document.html()
-        val rawParams = Regex("""urlParams\s*=\s*'([^']+)'""").find(pageHtml)?.groupValues?.get(1)
-            ?: Regex("""urlParams\s*=\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
-        val signQuery = rawParams?.let(::urlParamsToQuery).orEmpty()
+        val rawParams = extractUrlParams(pageHtml) ?: return emptyList()
+        val signQuery = urlParamsToQuery(rawParams)
 
         return translations.mapNotNull { option ->
             val mediaId = option.attr("data-media-id")
@@ -370,7 +370,7 @@ class AnimeGo :
     // opening <script> tag and swallows the rest of the page — including the translations
     // panel — as raw script text. Balance such tags before parsing.
     private suspend fun fetchKodikDocument(url: String): Document {
-        val body = client.get(url, kodikHeaders).body.string()
+        val body = client.get(url, kodikHeaders).bodyString()
         return Jsoup.parse(body.replace(SELF_CLOSING_SCRIPT_REGEX, "<script$1></script>"), url)
     }
 
@@ -382,9 +382,7 @@ class AnimeGo :
         val pageHtml = page.html()
 
         // urlParams is a JSON blob wrapped in quotes.
-        val rawParams = Regex("""urlParams\s*=\s*'([^']+)'""").find(pageHtml)?.groupValues?.get(1)
-            ?: Regex("""urlParams\s*=\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
-            ?: return emptyList()
+        val rawParams = extractUrlParams(pageHtml) ?: return emptyList()
 
         val formData = runCatching {
             rawParams.parseAs<KodikFormData>()
@@ -394,16 +392,13 @@ class AnimeGo :
 
         // Per-episode type/id/hash come from the vInfo object:
         //     vInfo.type = 'seria';  vInfo.hash = '...';  vInfo.id = '1407443';
-        val typeRe = Regex("""\.type\s*=\s*['"]([^'"]+)['"]""")
-        val hashRe = Regex("""\.hash\s*=\s*['"]([^'"]+)['"]""")
-        val idRe = Regex("""\.id\s*=\s*['"]?([A-Za-z0-9]+)['"]?""")
         var videoType: String? = null
         var videoId: String? = null
         var videoHash: String? = null
         for (script in page.select("script").map { it.data() }) {
-            val t = typeRe.find(script)?.groupValues?.get(1) ?: continue
-            val h = hashRe.find(script)?.groupValues?.get(1) ?: continue
-            val i = idRe.find(script)?.groupValues?.get(1) ?: continue
+            val t = VIDEO_TYPE_REGEX.find(script)?.groupValues?.get(1) ?: continue
+            val h = VIDEO_HASH_REGEX.find(script)?.groupValues?.get(1) ?: continue
+            val i = VIDEO_ID_REGEX.find(script)?.groupValues?.get(1) ?: continue
             videoType = t
             videoHash = h
             videoId = i
@@ -458,7 +453,7 @@ class AnimeGo :
 
         val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
             runCatching {
-                client.get(scriptUrl, kodikHeaders).body.string()
+                client.get(scriptUrl, kodikHeaders).bodyString()
             }.getOrNull() ?: return emptyList()
         }
 
@@ -530,6 +525,10 @@ class AnimeGo :
 
     private fun String.fixProtocol(): String = if (startsWith("//")) "https:$this" else this
 
+    // urlParams is a JSON blob assigned to a JS variable, quoted with either quote style.
+    private fun extractUrlParams(pageHtml: String): String? = URL_PARAMS_SINGLE_QUOTED_REGEX.find(pageHtml)?.groupValues?.get(1)
+        ?: URL_PARAMS_DOUBLE_QUOTED_REGEX.find(pageHtml)?.groupValues?.get(1)
+
     companion object {
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "720"
@@ -538,5 +537,10 @@ class AnimeGo :
         private val ATOB_REGEX = Regex("atob\\([^\"]")
         private val SELF_CLOSING_SCRIPT_REGEX = Regex("""<script([^>]*)/>""")
         private val QUALITY_REGEX = Regex("""(\d{3,4})\s*p""")
+        private val URL_PARAMS_SINGLE_QUOTED_REGEX = Regex("""urlParams\s*=\s*'([^']+)'""")
+        private val URL_PARAMS_DOUBLE_QUOTED_REGEX = Regex("""urlParams\s*=\s*"([^"]+)"""")
+        private val VIDEO_TYPE_REGEX = Regex("""\.type\s*=\s*['"]([^'"]+)['"]""")
+        private val VIDEO_HASH_REGEX = Regex("""\.hash\s*=\s*['"]([^'"]+)['"]""")
+        private val VIDEO_ID_REGEX = Regex("""\.id\s*=\s*['"]?([A-Za-z0-9]+)['"]?""")
     }
 }
