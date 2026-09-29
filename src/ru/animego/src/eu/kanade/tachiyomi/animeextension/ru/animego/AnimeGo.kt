@@ -259,9 +259,9 @@ class AnimeGo :
                 name = "Серия $ep"
                 episode_number = ep.toFloat()
                 url = playerUrl.toHttpUrl().newBuilder()
-                     .setQueryParameter("episode", ep.toString())
-                     .build()
-                     .toString()
+                    .setQueryParameter("episode", ep.toString())
+                    .build()
+                    .toString()
             }
         }
     }
