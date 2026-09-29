@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.ru.aniliberty
 
+import android.webkit.WebSettings
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
@@ -12,6 +13,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addListPreference
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.SerialName
@@ -37,10 +39,22 @@ class Aniliberty :
 
     private val preferences by getPreferencesLazy()
 
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("User-Agent", USER_AGENT)
+    // anilibria.top sits behind Cloudflare, and the app's default User-Agent (Firefox/136) does
+    // not match the Chromium WebView that has to pass the challenge. Cloudflare binds
+    // `cf_clearance` to the fingerprint of the client that earned it, so a clearance obtained by
+    // a Chromium WebView claiming to be Firefox gets rejected on the next OkHttp request.
+    // Sending the WebView's own UA keeps both sides presenting the same client.
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("User-Agent", webViewUserAgent)
         .add("Referer", "$baseUrl/")
         .add("Accept", "application/json")
+
+    private val webViewUserAgent: String by lazy {
+        runCatching { WebSettings.getDefaultUserAgent(applicationContext) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: FALLBACK_USER_AGENT
+    }
 
     // ─── Popular / Latest ─────────────────────────────────────────────────────
 
@@ -148,8 +162,7 @@ class Aniliberty :
         val ep = release.episodes.firstOrNull { it.id == episodeId }
             ?: return emptyList()
 
-        val videoHeaders = Headers.Builder()
-            .add("User-Agent", USER_AGENT)
+        val videoHeaders = headers.newBuilder()
             .add("Referer", "$baseUrl/")
             .build()
 
@@ -215,9 +228,12 @@ class Aniliberty :
 
     companion object {
         private const val PAGE_LIMIT = 30
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/124.0.0.0 Safari/537.36"
+
+        // Only used when the system WebView refuses to report its UA; the UA has to match the
+        // engine that solves the Cloudflare challenge.
+        private const val FALLBACK_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "1080"
 
@@ -238,22 +254,22 @@ class Aniliberty :
 // ─── API DTOs ──────────────────────────────────────────────────────────────────
 
 @Serializable
-private data class CatalogResponse(
+private class CatalogResponse(
     val data: List<Release> = emptyList(),
     val meta: Meta? = null,
 )
 
 @Serializable
-private data class Meta(val pagination: Pagination? = null)
+private class Meta(val pagination: Pagination? = null)
 
 @Serializable
-private data class Pagination(
+private class Pagination(
     @SerialName("current_page") val currentPage: Int = 1,
     @SerialName("total_pages") val totalPages: Int = 1,
 )
 
 @Serializable
-private data class Release(
+private class Release(
     val id: Int,
     val alias: String? = null,
     val name: Name? = null,
@@ -267,14 +283,14 @@ private data class Release(
 )
 
 @Serializable
-private data class Name(
+private class Name(
     val main: String? = null,
     val english: String? = null,
     val alternative: String? = null,
 )
 
 @Serializable
-private data class Poster(
+private class Poster(
     val src: String? = null,
     val optimized: Poster? = null,
 ) {
@@ -282,16 +298,16 @@ private data class Poster(
 }
 
 @Serializable
-private data class Labeled(
+private class Labeled(
     val value: String? = null,
     val description: String? = null,
 )
 
 @Serializable
-private data class Genre(val id: Int? = null, val name: String? = null)
+private class Genre(val id: Int? = null, val name: String? = null)
 
 @Serializable
-private data class Episode(
+private class Episode(
     val id: String? = null,
     val name: String? = null,
     val ordinal: Float? = null,
