@@ -254,17 +254,17 @@ class Rezka :
         }.let(::applyQualityPreference)
     }
 
-    // Keep only the preferred quality; if it's unavailable, fall back to the closest one
-    // (ties prefer higher). Entries whose quality can't be parsed are always kept.
+    // Put the preferred quality first but keep the others: filtering them out would silently
+    // drop a whole dubbing whose catalogue has no rendition at the preferred quality.
     private fun applyQualityPreference(videos: List<Video>): List<Video> {
         val pref = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!.toIntOrNull()
             ?: return videos
-        val available = videos.mapNotNull { it.videoTitle.parseQuality() }.distinct()
-        if (available.isEmpty()) return videos
-        val target = available.minWithOrNull(
-            compareBy({ kotlin.math.abs(it - pref) }, { -it }),
-        ) ?: return videos
-        return videos.filter { v -> v.videoTitle.parseQuality()?.let { it == target } ?: true }
+        return videos.sortedWith(
+            compareBy(
+                { it.videoTitle.parseQuality()?.let { q -> kotlin.math.abs(q - pref) } ?: Int.MAX_VALUE },
+                { -(it.videoTitle.parseQuality() ?: 0) },
+            ),
+        )
     }
 
     private fun String.parseQuality(): Int? {
