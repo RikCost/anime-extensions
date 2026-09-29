@@ -1,7 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.ru.rutracker
 
+import android.webkit.WebSettings
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.cloudflareinterceptor.CloudflareInterceptor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -10,12 +10,14 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.addSwitchPreference
+import keiyoushi.utils.applicationContext
+import keiyoushi.utils.formatBytes
+import keiyoushi.utils.get
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -76,22 +78,41 @@ class RuTracker :
     private val forumUrl: String
         get() = "$baseUrl/forum"
 
+    // RuTracker sits behind Cloudflare, and `network.client` already solves the challenge in a
+    // WebView (see CONTRIBUTING.md — the app handles Cloudflare, `network.cloudflareClient` is
+    // deprecated). That solve is what the UA below is built around: the app's default User-Agent
+    // is Firefox/136, but the WebView that has to pass the challenge is a Chromium engine.
+    // Cloudflare binds `cf_clearance` to the fingerprint of the client that earned it, so a
+    // clearance obtained by a Chromium WebView *pretending* to be Firefox is rejected on the
+    // following OkHttp retry — the source then failed with "Cloudflare WebView solve did not
+    // clear challenge for rutracker.org" even though the very same page opens fine in a browser.
+    // Sending the WebView's own (real Chromium) UA makes the WebView and the retry present the
+    // same client, and the clearance carries over. Verified by replaying a WebView-earned
+    // clearance: Chromium UA → 302 (accepted), Firefox UA → 403 (rejected).
+    //
+    // `WebSettings.getDefaultUserAgent` is the WebView's genuine UA, so this stays correct when
+    // the system WebView updates.
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
+        .set("User-Agent", webViewUserAgent)
 
-    // RuTracker sits behind Cloudflare: the CloudflareInterceptor solves challenges via WebView
-    // and stores cf_clearance in the shared cookie jar. The auth interceptor must run after it
-    // so it never mistakes a challenge page for a logged-out response.
+    private val webViewUserAgent: String by lazy {
+        runCatching { WebSettings.getDefaultUserAgent(applicationContext) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: FALLBACK_USER_AGENT
+    }
+
+    // The app's own Cloudflare handling is already part of `network.client` and runs before the
+    // auth interceptor, so a challenge page never reaches the login check. The auth interceptor
+    // only adds the RuTracker session (bb_session) on top of it.
     override val client = network.client.newBuilder()
-        .addInterceptor(CloudflareInterceptor(network.client))
         .addInterceptor(::authInterceptor)
         .build()
 
-    // Same Cloudflare handling but without the auth interceptor — used for the login POST
-    // itself so it also passes the challenge, while the shared cookie jar keeps bb_session.
-    private val authClient = network.client.newBuilder()
-        .addInterceptor(CloudflareInterceptor(network.client))
-        .build()
+    // Same Cloudflare handling but without the auth interceptor — used for the login POST itself
+    // so it also passes the challenge, while the shared cookie jar keeps bb_session.
+    private val authClient = network.client.newBuilder().build()
 
     private val loginLock = Any()
 
@@ -365,8 +386,7 @@ class RuTracker :
 
                 runCatching {
                     gate.withPermit {
-                        val doc = client.newCall(GET(baseUrl + anime.url, headers))
-                            .awaitSuccess().use { it.asJsoup() }
+                        val doc = client.get(baseUrl + anime.url, headers).use { it.asJsoup() }
                         extractThumbnail(doc, doc.selectFirst("div.post_body"))?.let { cover ->
                             coverCache[anime.url] = cover
                             anime.thumbnail_url = cover
@@ -443,18 +463,19 @@ class RuTracker :
 
     // ─── Episodes ─────────────────────────────────────────────────────────────────
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.asJsoup()
-        val size = document.selectFirst("#tor-size-humn, span.tor-size-humn")?.text()?.trim()
-        val topicId = response.request.url.queryParameter("t")
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val document = client.get(baseUrl + anime.url, headers).use { it.asJsoup() }
+        val topicId = document.selectFirst("a[href*='t=']")?.attr("abs:href")?.toHttpUrl()
+            ?.queryParameter("t")
 
         // Preferred: split a (multi-file) release — e.g. a whole season — into one playable
         // episode per video file, so each can be opened straight from the title.
-        topicId?.let { buildEpisodesFromTorrent(it) }
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { return it }
+        if (topicId != null) {
+            buildEpisodesFromTorrent(topicId)?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
 
         // Fallback: hand the whole torrent to the player as a single entry.
+        val size = document.selectFirst("#tor-size-humn, span.tor-size-humn")?.text()
         val magnet = document.selectFirst("a.magnet-link")?.attr("href")
             ?: document.selectFirst("""a[href^="magnet:"]""")?.attr("href")
             ?: return emptyList()
@@ -469,11 +490,14 @@ class RuTracker :
         )
     }
 
-    private fun buildEpisodesFromTorrent(topicId: String): List<SEpisode>? {
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
+
+    private suspend fun buildEpisodesFromTorrent(topicId: String): List<SEpisode>? {
         val dlUrl = "$forumUrl/dl.php?t=$topicId"
 
-        // Download the .torrent ourselves (authenticated — dl.php requires the login cookie,
-        // generic helpers fetch without it and just waste a full download) and parse the bencode.
+        // Download the .torrent ourselves (authenticated — dl.php requires the login cookie) and
+        // parse the bencode. Done in a suspend function so the blocking read never happens on the
+        // caller's thread from inside a parse method.
         val bytes = downloadTorrent(dlUrl) ?: return null
         return runCatching {
             val meta = RuTrackerTorrent.parse(bytes)
@@ -482,8 +506,8 @@ class RuTracker :
         }.getOrNull()?.takeIf { it.isNotEmpty() }
     }
 
-    private fun downloadTorrent(dlUrl: String): ByteArray? = runCatching {
-        client.newCall(GET(dlUrl, headers)).execute().use { resp ->
+    private suspend fun downloadTorrent(dlUrl: String): ByteArray? = runCatching {
+        client.get(dlUrl, headers).use { resp ->
             val bytes = resp.body.bytes()
             // A real .torrent is a bencoded dict starting with 'd'; an HTML login page is not.
             if (resp.isSuccessful && bytes.firstOrNull() == 'd'.code.toByte()) bytes else null
@@ -507,20 +531,9 @@ class RuTracker :
                     url = "$magnetBase&index=$index"
                     name = path.substringAfterLast('/').trim()
                     episode_number = (number + 1).toFloat()
-                    scanlator = readableSize(size)
+                    scanlator = size.formatBytes()
                 }
             }
-    }
-
-    private fun readableSize(bytes: Long): String {
-        val units = arrayOf("B", "KB", "MB", "GB", "TB")
-        var value = bytes.toDouble()
-        var unit = 0
-        while (value >= 1024 && unit < units.lastIndex) {
-            value /= 1024
-            unit++
-        }
-        return String.format(Locale.ROOT, "%.2f %s", value, units[unit])
     }
 
     // ─── Videos ───────────────────────────────────────────────────────────────────
@@ -529,6 +542,10 @@ class RuTracker :
     override suspend fun getVideoList(episode: SEpisode): List<Video> = listOf(Video(episode.url, episode.name, episode.url))
 
     override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
+
+    // Episodes are numbered by position in the torrent's file list, so the default order already
+    // reflects the release's own ordering. Only the multi-file seasons need the file name to
+    // stay visible for orientation, which it is (see [getEpisodeList]).
 
     // ─── Preferences ────────────────────────────────────────────────────────────
 
@@ -669,6 +686,13 @@ class RuTracker :
             "https://rutracker.org",
             "https://rutracker.net",
         )
+
+        // Only used when the system WebView refuses to report its UA (rare, but the getter throws
+        // on some devices while the WebView provider is being updated). A current Chromium UA is
+        // the only sensible value here: the UA has to match the engine that solves the challenge.
+        private const val FALLBACK_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
 
         private const val PAGE_SIZE = 50
         private const val DESC_LIMIT = 2000
