@@ -258,7 +258,10 @@ class AnimeGo :
             SEpisode.create().apply {
                 name = "Серия $ep"
                 episode_number = ep.toFloat()
-                url = "$playerUrl?episode=$ep"
+                url = playerUrl.toHttpUrl().newBuilder()
+                          .setQueryParameter("episode", ep.toString())
+                          .build()
+                          .toString()
             }
         }
     }
