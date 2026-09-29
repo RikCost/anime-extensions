@@ -39,7 +39,7 @@ class AnimeGo :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
 
-    override val name = "AnimeGO"
+    override val name = "AnimeGO.studio"
     override val baseUrl = "https://animego.studio"
     override val lang = "ru"
     override val supportsLatest = true
@@ -331,18 +331,17 @@ class AnimeGo :
     // Voice-overs before subtitles now applies to the hoster (audio track) list.
     override fun List<Hoster>.sortHosters(): List<Hoster> = sortedBy { it.hosterName.contains("Субтитры", ignoreCase = true) }
 
-    // Keep only the quality selected in the extension settings; if it is not available,
-    // fall back to the closest one (ties prefer the higher quality). Videos whose quality
-    // cannot be parsed are always kept, so the list never ends up empty.
+    // Put the preferred quality first but keep the others: filtering them out would silently
+    // drop a whole dubbing whose catalogue has no rendition at the preferred quality.
     private fun applyQualityPreference(videos: List<Video>): List<Video> {
         val pref = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!.toIntOrNull()
             ?: return videos
-        val available = videos.mapNotNull { it.videoTitle.parseQuality() }.distinct()
-        if (available.isEmpty()) return videos
-        val target = available.minWithOrNull(
-            compareBy({ kotlin.math.abs(it - pref) }, { -it }),
-        ) ?: return videos
-        return videos.filter { video -> video.videoTitle.parseQuality()?.let { it == target } ?: true }
+        return videos.sortedWith(
+            compareBy(
+                { it.videoTitle.parseQuality()?.let { q -> kotlin.math.abs(q - pref) } ?: Int.MAX_VALUE },
+                { -(it.videoTitle.parseQuality() ?: 0) },
+            ),
+        )
     }
 
     private fun String.parseQuality(): Int? = QUALITY_REGEX.find(this)?.groupValues?.get(1)?.toIntOrNull()
