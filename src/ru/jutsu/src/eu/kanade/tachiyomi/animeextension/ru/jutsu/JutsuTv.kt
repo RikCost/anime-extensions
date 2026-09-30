@@ -1,11 +1,8 @@
 package eu.kanade.tachiyomi.animeextension.ru.jutsu
 
-import android.net.Uri
-import android.util.Base64
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.playlistutils.PlaylistUtils
-import app.cash.quickjs.QuickJs
+import aniyomi.lib.kodikextractor.KodikExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -416,172 +413,28 @@ class JutsuTv :
 
     // ─── Kodik player ─────────────────────────────────────────────────────
 
-    // Base headers (incl. the default browser-like User-Agent) with the site referer.
+    // Kodik pages contain a self-closing <script .../> inside an inline <svg>. Browsers
+    // parse it as an empty element (SVG foreign-content rules), but Jsoup treats it as an
+    // opening <script> tag and swallows the rest of the page as raw script text, which
+    // hides the translations panel. Balance such tags before parsing.
+    private suspend fun fetchKodikDocument(url: String): Document {
+        val body = client.get(url, kodikHeaders).bodyString()
+        return Jsoup.parse(body.replace(SELF_CLOSING_SCRIPT_REGEX, "<script$1></script>"), url)
+    }
+
     private val kodikHeaders: Headers by lazy {
         headers.newBuilder()
             .set("Referer", "$baseUrl/")
             .build()
     }
 
-    private val decodeScriptCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val kodikExtractor by lazy { KodikExtractor(client, headers) }
 
-    // Kodik pages contain a self-closing <script .../> inside an inline <svg>. Browsers
-    // parse it as an empty element (SVG foreign-content rules), but Jsoup treats it as an
-    // opening <script> tag and swallows the rest of the page — including the translations
-    // panel — as raw script text. Balance such tags before parsing.
-    private suspend fun fetchKodikDocument(url: String): Document {
-        val body = client.get(url, kodikHeaders).bodyString()
-        return Jsoup.parse(body.replace(SELF_CLOSING_SCRIPT_REGEX, "<script$1></script>"), url)
-    }
-
-    private suspend fun isUrlAvailable(url: String, headers: Headers): Boolean = runCatching {
-        client.get(url, headers).use { it.isSuccessful }
-    }.getOrDefault(false)
-
-    private suspend fun kodikVideoLinks(playerPageUrl: String, dubbing: String): List<Video> {
-        val page = runCatching {
-            fetchKodikDocument(playerPageUrl)
-        }.getOrNull() ?: return emptyList()
-
-        val pageHtml = page.html()
-
-        // urlParams is a JSON blob wrapped in quotes.
-        val rawParams = extractUrlParams(pageHtml) ?: return emptyList()
-
-        val formData = runCatching {
-            rawParams.parseAs<KodikFormData>()
-        }.getOrNull() ?: return emptyList()
-
-        if (formData.dSign.isEmpty()) return emptyList()
-
-        // Per-episode type/id/hash come from the vInfo object:
-        //     vInfo.type = 'seria';  vInfo.hash = '...';  vInfo.id = '1407443';
-        var videoType: String? = null
-        var videoId: String? = null
-        var videoHash: String? = null
-        for (script in page.select("script").map { it.data() }) {
-            val t = VIDEO_TYPE_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            val h = VIDEO_HASH_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            val i = VIDEO_ID_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            videoType = t
-            videoHash = h
-            videoId = i
-            break
-        }
-
-        // Fallback to the player URL path: https://{host}/{type}/{id}/{hash}/720p
-        val urlParts = playerPageUrl.substringAfter("://").substringBefore('?').split('/')
-        val resolvedType = videoType ?: urlParts.getOrNull(1)
-        val resolvedId = videoId ?: urlParts.getOrNull(2)
-        val resolvedHash = videoHash ?: urlParts.getOrNull(3)
-        if (resolvedType == null || resolvedId == null || resolvedHash == null) return emptyList()
-
-        val playerHost = playerPageUrl.substringAfter("://").substringBefore('/')
-
-        val postBody = FormBody.Builder()
-            .add("d", formData.d)
-            .add("d_sign", Uri.decode(formData.dSign))
-            .add("pd", formData.pd)
-            .add("pd_sign", Uri.decode(formData.pdSign))
-            .add("ref", Uri.decode(formData.ref))
-            .add("ref_sign", Uri.decode(formData.refSign))
-            .add("type", resolvedType)
-            .add("id", resolvedId)
-            .add("hash", resolvedHash)
-            .add("bad_user", "true")
-            .add("cdn_is_working", "true")
-            .build()
-
-        val postHeaders = headers.newBuilder()
-            .set("Referer", playerPageUrl)
-            .set("Origin", "https://$playerHost")
-            .build()
-
-        val kodikData = runCatching {
-            client.newCall(
-                Request.Builder()
-                    .url("https://$playerHost/ftor")
-                    .post(postBody)
-                    .headers(postHeaders)
-                    .build(),
-            ).execute().parseAs<KodikData>()
-        }.getOrNull() ?: return emptyList()
-
-        // Decode each quality with the page's own JS function via QuickJs.
-        val scriptUrl = (
-            page.selectFirst("script[src*=app.serial]")
-                ?: page.selectFirst("script[src*=app.video]")
-                ?: page.selectFirst("script[src*=player]")
-                ?: page.selectFirst("script[src*=app]")
-            )?.attr("abs:src") ?: return emptyList()
-
-        val jsScript = decodeScriptCache.getOrPut(scriptUrl) {
-            runCatching {
-                client.get(scriptUrl, kodikHeaders).bodyString()
-            }.getOrNull() ?: return emptyList()
-        }
-
-        val atobMatch = ATOB_REGEX.find(jsScript) ?: return emptyList()
-
-        var encodeScript = "("
-        val deque = ArrayDeque<Char>()
-        deque.addFirst('(')
-        for (i in atobMatch.range.last until jsScript.length) {
-            val char = jsScript[i]
-            when (char) {
-                '(', '{' -> deque.addFirst(char)
-                ')', '}' -> if (deque.isNotEmpty()) deque.removeFirst()
-            }
-            encodeScript += char
-            if (deque.isEmpty()) break
-        }
-
-        val hlsHeaders = headers.newBuilder()
-            .set("Referer", "https://$playerHost/")
-            .set("Origin", "https://$playerHost")
-            .build()
-
-        val qualityMap = mapOf(
-            "360" to kodikData.links.ugly,
-            "480" to kodikData.links.bad,
-            "720" to kodikData.links.good,
-            "1080" to kodikData.links.full,
-        )
-
-        return QuickJs.create().use { qjs ->
-            qualityMap.flatMap { (qualityName, links) ->
-                val encodedSrc = links.firstOrNull()?.src ?: return@flatMap emptyList()
-                val base64Url = runCatching {
-                    qjs.evaluate("t='$encodedSrc'; $encodeScript").toString()
-                }.getOrNull() ?: return@flatMap emptyList()
-
-                val hlsUrl = runCatching {
-                    Base64.decode(base64Url, Base64.DEFAULT).toString(Charsets.UTF_8)
-                }.getOrNull()?.fixProtocol() ?: return@flatMap emptyList()
-
-                if (hlsUrl.contains(".mpd")) {
-                    PlaylistUtils(client, headers).extractFromDash(
-                        hlsUrl,
-                        { res: String -> "$dubbing (${qualityName}p Kodik - $res)" },
-                        hlsHeaders,
-                        hlsHeaders,
-                    )
-                } else {
-                    buildList {
-                        // Kodik's API reports at most 720p, but the CDN usually stores a
-                        // 1080p rendition at the same path — probe for it.
-                        if (qualityName == "720" && kodikData.links.full.isEmpty()) {
-                            val hlsUrl1080 = hlsUrl.replace("/720.mp4", "/1080.mp4")
-                            if (hlsUrl1080 != hlsUrl && isUrlAvailable(hlsUrl1080, hlsHeaders)) {
-                                add(Video(hlsUrl1080, "$dubbing (1080p Kodik)", hlsUrl1080, headers = hlsHeaders))
-                            }
-                        }
-                        add(Video(hlsUrl, "$dubbing (${qualityName}p Kodik)", hlsUrl, headers = hlsHeaders))
-                    }
-                }
-            }
-        }
-    }
+    private suspend fun kodikVideoLinks(playerPageUrl: String, dubbing: String): List<Video> = kodikExtractor.videosFromUrl(
+        playerPageUrl,
+        prefix = dubbing,
+        probeHigherQuality = true,
+    )
 
     // ============================= Preferences ============================
 
@@ -611,12 +464,8 @@ class JutsuTv :
         private val EP_COUNT_REGEX = Regex("""\((\d+)\s*эп""")
         private val STATUS_REGEX = Regex("""Статус:\s*([А-Яа-яёЁ]+)""")
         private val QUALITY_REGEX = Regex("""(\d{3,4})\s*p""")
-        private val ATOB_REGEX = Regex("atob\\([^\"]")
         private val SELF_CLOSING_SCRIPT_REGEX = Regex("""<script([^>]*)/>""")
         private val URL_PARAMS_SINGLE_QUOTED_REGEX = Regex("""urlParams\s*=\s*'([^']+)'""")
         private val URL_PARAMS_DOUBLE_QUOTED_REGEX = Regex("""urlParams\s*=\s*"([^"]+)"""")
-        private val VIDEO_TYPE_REGEX = Regex("""\.type\s*=\s*['"]([^'"]+)['"]""")
-        private val VIDEO_HASH_REGEX = Regex("""\.hash\s*=\s*['"]([^'"]+)['"]""")
-        private val VIDEO_ID_REGEX = Regex("""\.id\s*=\s*['"]?([A-Za-z0-9]+)['"]?""")
     }
 }

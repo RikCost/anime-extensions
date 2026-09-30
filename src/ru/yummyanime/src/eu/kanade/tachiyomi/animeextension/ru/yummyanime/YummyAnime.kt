@@ -1,12 +1,10 @@
 package eu.kanade.tachiyomi.animeextension.ru.yummyanime
 
-import android.net.Uri
-import android.util.Base64
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
+import aniyomi.lib.kodikextractor.KodikExtractor
 import aniyomi.lib.playlistutils.PlaylistUtils
 import aniyomi.lib.sibnetextractor.SibnetExtractor
-import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -19,8 +17,6 @@ import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.useAsJsoup
-import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
@@ -38,6 +34,8 @@ class YummyAnime :
     private val appToken = "o0nap18m_7a0od86"
     private val sibnetExtractor by lazy { SibnetExtractor(client) }
     private val preferences by getPreferencesLazy()
+
+    private val kodikExtractor by lazy { KodikExtractor(client, headers) }
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
         .add("Accept", "application/json")
@@ -203,138 +201,11 @@ class YummyAnime :
 
     // ============================ Kodik Player ===============================
 
-    private fun kodikVideoLinks(iframeUrl: String, dubbing: String): List<Video> {
-        val kodikHeaders = Headers.Builder()
-            .add("Referer", "$baseUrl/")
-            .add("X-Application", appToken)
-            .build()
-
-        val page = runCatching {
-            client.newCall(GET(iframeUrl, kodikHeaders)).execute().useAsJsoup()
-        }.getOrNull() ?: return emptyList()
-
-        val pageHtml = page.html()
-
-        val rawParams = URL_PARAMS_REGEX.find(pageHtml)?.groupValues?.get(1)
-            ?: URL_PARAMS_REGEX_ALT.find(pageHtml)?.groupValues?.get(1)
-            ?: return emptyList()
-
-        val formData = runCatching {
-            rawParams.parseAs<KodikFormData>()
-        }.getOrNull() ?: return emptyList()
-
-        if (formData.dSign.isEmpty()) return emptyList()
-
-        var videoType: String? = null
-        var videoId: String? = null
-        var videoHash: String? = null
-        for (script in page.select("script").map { it.data() }) {
-            val t = TYPE_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            val h = HASH_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            val i = ID_REGEX.find(script)?.groupValues?.get(1) ?: continue
-            videoType = t
-            videoHash = h
-            videoId = i
-            break
-        }
-        if (videoType == null || videoHash == null || videoId == null) {
-            videoType = videoType ?: TYPE_REGEX.find(pageHtml)?.groupValues?.get(1)
-            videoHash = videoHash ?: HASH_REGEX.find(pageHtml)?.groupValues?.get(1)
-            videoId = videoId ?: ID_REGEX.find(pageHtml)?.groupValues?.get(1)
-        }
-
-        val urlParts = iframeUrl.removePrefix("https://").removePrefix("http://").split('/')
-        val resolvedType = videoType ?: urlParts.getOrNull(1)
-        val resolvedId = videoId ?: urlParts.getOrNull(2)
-        val resolvedHash = videoHash ?: urlParts.getOrNull(3)
-        if (resolvedType == null || resolvedId == null || resolvedHash == null) return emptyList()
-
-        val postBody = FormBody.Builder()
-            .add("d", formData.d)
-            .add("d_sign", Uri.decode(formData.dSign))
-            .add("pd", formData.pd)
-            .add("pd_sign", Uri.decode(formData.pdSign))
-            .add("ref", Uri.decode(formData.ref))
-            .add("ref_sign", Uri.decode(formData.refSign))
-            .add("type", resolvedType)
-            .add("id", resolvedId)
-            .add("hash", resolvedHash)
-            .add("bad_user", "true")
-            .add("cdn_is_working", "true")
-            .build()
-
-        val postHeaders = Headers.Builder()
-            .add("Referer", "$baseUrl/")
-            .add("Origin", baseUrl)
-            .add("X-Application", appToken)
-            .build()
-
-        val playerHost = iframeUrl.removePrefix("https://").removePrefix("http://")
-            .substringBefore('/')
-            .ifEmpty { "kodikplayer.com" }
-
-        val kodikData = runCatching {
-            client.newCall(
-                Request.Builder()
-                    .url("https://$playerHost/ftor")
-                    .post(postBody)
-                    .headers(postHeaders)
-                    .build(),
-            ).execute().parseAs<KodikData>()
-        }.getOrNull() ?: return emptyList()
-
-        val hlsHeaders = Headers.Builder()
-            .add("Referer", "$baseUrl/")
-            .add("Origin", baseUrl)
-            .add("X-Application", appToken)
-            .build()
-
-        val qualityMap = mapOf(
-            "360" to kodikData.links.ugly,
-            "480" to kodikData.links.bad,
-            "720" to kodikData.links.good,
-        )
-
-        val scriptUrl = (
-            page.selectFirst("script[src*=player_single]")
-                ?: page.selectFirst("script[src*=player_serial]")
-                ?: page.selectFirst("script[src*=player]")
-            )?.attr("abs:src") ?: return emptyList()
-
-        val jsScript = runCatching {
-            client.newCall(GET(scriptUrl, kodikHeaders)).execute().body.string()
-        }.getOrNull() ?: return emptyList()
-
-        val atobMatch = ATOB_REGEX.find(jsScript) ?: return emptyList()
-
-        var encodeScript = "("
-        val deque = ArrayDeque<Char>()
-        deque.addFirst('(')
-        for (i in atobMatch.range.last until jsScript.length) {
-            val char = jsScript[i]
-            when (char) {
-                '(', '{' -> deque.addFirst(char)
-                ')', '}' -> if (deque.isNotEmpty()) deque.removeFirst()
-            }
-            encodeScript += char
-            if (deque.isEmpty()) break
-        }
-
-        return QuickJs.create().use { qjs ->
-            qualityMap.flatMap { (qualityName, links) ->
-                val encodedSrc = links.firstOrNull()?.src ?: return@flatMap emptyList()
-                val base64Url = runCatching {
-                    qjs.evaluate("t='$encodedSrc'; $encodeScript").toString()
-                }.getOrNull() ?: return@flatMap emptyList()
-
-                val hlsUrl = runCatching {
-                    Base64.decode(base64Url, Base64.DEFAULT).toString(Charsets.UTF_8)
-                }.getOrNull()?.fixProtocol() ?: return@flatMap emptyList()
-
-                buildKodikVideos(hlsUrl, qualityName, dubbing, hlsHeaders)
-            }
-        }
-    }
+    private suspend fun kodikVideoLinks(iframeUrl: String, dubbing: String): List<Video> = kodikExtractor.videosFromUrl(
+        iframeUrl,
+        prefix = dubbing,
+        qualities = KODIK_QUALITIES,
+    )
 
     private fun buildKodikVideos(
         hlsUrl: String,
@@ -411,6 +282,8 @@ class YummyAnime :
     companion object {
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "720"
+
+        private val KODIK_QUALITIES = listOf("360", "480", "720")
 
         private val QUALITY_REGEX = Regex("""(\d{3,4})\s*p""")
         private val ATOB_REGEX = Regex("atob\\([^\"]")
