@@ -94,19 +94,22 @@ class KodikExtractor(
                         .toString(Charsets.UTF_8)
                 }.getOrNull()?.fixProtocol() ?: return@flatMap emptyList()
 
-                val title = "$label($quality Kodik - %s)".takeIf { probeHigherQuality } ?: "$label($quality Kodik)"
+                // The trailing "p" matters: callers pick their preferred quality by parsing it
+                // back out of the title, so "(720 Kodik)" would be invisible to them.
+                val dashTitle = "$label($quality" + "p Kodik - %s)"
+                val plainTitle = "$label($quality" + "p Kodik)"
 
                 if (streamUrl.endsWith(".mpd")) {
-                    playlistUtils.extractFromDash(streamUrl, { title.replace("%s", it) }, streamHeaders, streamHeaders)
+                    playlistUtils.extractFromDash(streamUrl, { dashTitle.replace("%s", it) }, streamHeaders, streamHeaders)
                 } else {
                     buildList {
                         if (probeHigherQuality && quality == "720" && response.full.isEmpty()) {
                             val higher = streamUrl.replace("/720.mp4", "/1080.mp4")
                             if (higher != streamUrl && isAvailable(higher, streamHeaders)) {
-                                add(Video(higher, "$label(1080 Kodik)", higher, headers = streamHeaders))
+                                add(Video(higher, "$label(1080p Kodik)", higher, headers = streamHeaders))
                             }
                         }
-                        add(Video(streamUrl, title.replace("%s", ""), streamUrl, headers = streamHeaders))
+                        add(Video(streamUrl, plainTitle, streamUrl, headers = streamHeaders))
                     }
                 }
             }
