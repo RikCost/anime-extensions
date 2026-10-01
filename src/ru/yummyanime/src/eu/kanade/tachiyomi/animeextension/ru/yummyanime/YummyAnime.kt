@@ -291,6 +291,11 @@ class YummyAnime :
         val videos = mutableListOf<Video>()
         for ((label, url) in response.qualities) {
             val streamUrl = url?.takeIf { it.isNotBlank() } ?: continue
+            // Aksor answers with a path that may no longer be served — the CDN is sharded and a
+            // dubbing whose file is gone comes back 403/404 only when the player opens it.
+            // Ask for the first byte now, so a dead entry is dropped from the list instead of
+            // being offered and failing on press.
+            if (!isStreamAlive(streamUrl)) continue
             // Not extractFromDash: that helper takes the stream url from the text inside
             // <Representation>, and Aksor's manifest carries a <SegmentTemplate> instead, so
             // it handed back an empty url. The manifest is a plain DASH one that the player
@@ -304,6 +309,11 @@ class YummyAnime :
         }
         return videos
     }
+
+    /** One byte of the manifest: enough to tell a served file from a dead path, cheap to fetch. */
+    private suspend fun isStreamAlive(url: String): Boolean = runCatching {
+        client.get(url, headers.newBuilder().add("Range", "bytes=0-0").build()).isSuccessful
+    }.getOrDefault(false)
 
     /** "q1080" -> "1080", "q2k" -> "2160", "q4k" -> "3840". */
     private fun qualityLabel(label: String): String = when (val value = label.removePrefix("q").lowercase()) {
