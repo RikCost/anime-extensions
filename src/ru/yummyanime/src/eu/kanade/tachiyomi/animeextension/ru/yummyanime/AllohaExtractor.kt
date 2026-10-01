@@ -143,11 +143,18 @@ class AllohaExtractor(private val client: OkHttpClient) {
         // Subtitle files (.vtt/.srt) the player requests — attached to the resulting
         // Video as selectable subtitle tracks.
         val capturedSubs = LinkedHashSet<String>()
+
+        // The WebView keeps loading until it is destroyed, so subtitle requests can still
+        // arrive while the result is being assembled. Snapshot on the main thread where
+        // every write happens, and read only that: iterating the live set from the caller
+        // thread can throw ConcurrentModificationException and lose the whole dubbing.
+        val deliveredSubs = java.util.concurrent.atomic.AtomicReference<List<String>>(emptyList())
         var settleRunnable: Runnable? = null
 
         fun deliver(urls: List<String>) {
             if (delivered) return
             delivered = true
+            deliveredSubs.set(capturedSubs.toList())
             val wv = webView
             webView = null
             settleRunnable?.let(handler::removeCallbacks)
@@ -301,7 +308,7 @@ class AllohaExtractor(private val client: OkHttpClient) {
                         quality = "$prefix (Alloha)",
                         videoUrl = streamUrl,
                         headers = playbackHeaders,
-                        subtitleTracks = capturedSubs.mapIndexed { index, subUrl ->
+                        subtitleTracks = deliveredSubs.get().mapIndexed { index, subUrl ->
                             Track(subUrl, subtitleLabel(subUrl, index))
                         },
                     ),

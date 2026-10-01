@@ -235,7 +235,9 @@ class YummyAnime :
                 // from the compile-time stub and a failing copy() silently drops the entry.
                 Video(
                     url = playerUrl,
-                    quality = "$dubbing (Alloha)",
+                    // The extractor's own title carries the rendition; rebuilding it here
+                    // would drop the quality, and applyQualityPreference could not rank it.
+                    quality = extracted.videoTitle,
                     videoUrl = extracted.videoUrl,
                     headers = extracted.headers,
                     subtitleTracks = if (preferences.getBoolean(PREF_ALLOHA_SUBS_KEY, PREF_ALLOHA_SUBS_DEFAULT)) {
@@ -543,13 +545,16 @@ class YummyAnime :
         dubbing: String,
         episodePlaybackIdentity: String,
     ): List<Video> {
-        val id = iframeUrl.toHttpUrl().queryParameter("id") ?: return emptyList()
+        val id = runCatching { iframeUrl.toHttpUrl().queryParameter("id") }.getOrNull() ?: return emptyList()
         val parts = id.split("_", limit = 2)
         if (parts.size != 2) return emptyList()
 
         val embedUrl = "https://vk.com/video_ext.php?oid=${parts[0]}&id=${parts[1]}"
 
-        return vkExtractor.videosFromUrl(embedUrl, prefix = "$dubbing (VK) ")
+        // A VK failure (missing hash429 cookie, HTTP error) must not take the whole
+        // hoster down — the other player paths already degrade to an empty list.
+        return runCatching { vkExtractor.videosFromUrl(embedUrl, prefix = "$dubbing (VK) ") }
+            .getOrDefault(emptyList())
             .map { Video(episodePlaybackIdentity, it.videoTitle, it.videoUrl, it.headers) }
     }
 
