@@ -1,6 +1,7 @@
 ext {
     extName = 'YummyAnime'
     extClass = '.YummyAnime'
+    libVersion = 16
     extVersionCode = 3
     isNsfw = false
 }
