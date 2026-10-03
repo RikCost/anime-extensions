@@ -6,12 +6,13 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
@@ -24,7 +25,7 @@ import okhttp3.Request
 import okhttp3.Response
 
 class Aniliberty :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val name = "AniLiberty"
@@ -150,11 +151,31 @@ class Aniliberty :
         }.sortedByDescending { it.episode_number }
     }
 
+    // ─── Seasons / hosters parsed from a response are not used: both are resolved
+    // from suspend methods against the API v1 endpoints instead (see getHosterList).
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
     // ─── Videos ───────────────────────────────────────────────────────────────
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    // The API v1 release payload already carries the per-episode HLS streams, so the
+    // hosters are resolved directly from the episode url (release|episode ids) without
+    // an extra request here; videoListParse fetches the release matching the hoster.
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val releaseId = episode.url.substringBefore('|')
         val episodeId = episode.url.substringAfter('|')
+        return listOf(
+            Hoster(
+                hosterName = "HLS",
+                internalData = "$releaseId|$episodeId",
+            ),
+        )
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val releaseId = hoster.internalData.substringBefore('|')
+        val episodeId = hoster.internalData.substringAfter('|')
 
         val release = client.newCall(GET("$apiUrl/anime/releases/$releaseId", headers))
             .awaitSuccess().parseAs<Release>()
@@ -170,14 +191,14 @@ class Aniliberty :
             ep.hls1080?.let { Video(it, "1080p", it, headers = videoHeaders) },
             ep.hls720?.let { Video(it, "720p", it, headers = videoHeaders) },
             ep.hls480?.let { Video(it, "480p", it, headers = videoHeaders) },
-        ).sortVideos()
+        ).applyQualityPreference()
     }
 
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
-
-    override fun List<Video>.sortVideos(): List<Video> {
-        val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
-        return sortedByDescending { it.videoTitle.contains(quality) }
+    // Put the preferred quality first but keep the others, so the user can still fall
+    // back to a lower rendition when the preferred one is missing availability.
+    private fun List<Video>.applyQualityPreference(): List<Video> {
+        val pref = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
+        return sortedByDescending { it.videoTitle.startsWith(pref) }
     }
 
     // ─── Mappers ──────────────────────────────────────────────────────────────
