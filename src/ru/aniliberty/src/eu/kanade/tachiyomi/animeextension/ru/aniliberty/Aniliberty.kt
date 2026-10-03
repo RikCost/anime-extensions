@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.ru.aniliberty
 
-import android.webkit.WebSettings
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
@@ -14,7 +13,6 @@ import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.addListPreference
-import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.SerialName
@@ -40,22 +38,9 @@ class Aniliberty :
 
     private val preferences by getPreferencesLazy()
 
-    // anilibria.top sits behind Cloudflare, and the app's default User-Agent (Firefox/136) does
-    // not match the Chromium WebView that has to pass the challenge. Cloudflare binds
-    // `cf_clearance` to the fingerprint of the client that earned it, so a clearance obtained by
-    // a Chromium WebView claiming to be Firefox gets rejected on the next OkHttp request.
-    // Sending the WebView's own UA keeps both sides presenting the same client.
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("User-Agent", webViewUserAgent)
         .add("Referer", "$baseUrl/")
         .add("Accept", "application/json")
-
-    private val webViewUserAgent: String by lazy {
-        runCatching { WebSettings.getDefaultUserAgent(applicationContext) }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
-            ?: FALLBACK_USER_AGENT
-    }
 
     // ─── Popular / Latest ─────────────────────────────────────────────────────
 
@@ -250,11 +235,6 @@ class Aniliberty :
     companion object {
         private const val PAGE_LIMIT = 30
 
-        // Only used when the system WebView refuses to report its UA; the UA has to match the
-        // engine that solves the Cloudflare challenge.
-        private const val FALLBACK_USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/131.0.0.0 Mobile Safari/537.36"
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "1080"
 
