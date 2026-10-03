@@ -13,13 +13,14 @@ import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.UrlUtils
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.getPreferencesLazy
@@ -28,7 +29,6 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -42,7 +42,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 class Animelib :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val name = "Animelib"
@@ -68,6 +68,7 @@ class Animelib :
     private val dateFormatter by lazy { SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH) }
 
     companion object {
+        private val SUBTITLES_TEAM_REGEX = Regex("""(?:^|\.)[Ss]ubtitles$|[Сс]убтитры|Субтитры""", RegexOption.IGNORE_CASE)
         private const val PREF_DOMAIN_KEY = "pref_domain"
         private val PREF_DOMAIN_ENTRIES = arrayOf("animelib.org", "v3.animelib.org", "v4.animelib.org", "v5.animelib.org")
         private const val PREF_DOMAIN_DEFAULT = "animelib.org"
@@ -259,54 +260,108 @@ class Animelib :
     }
 
     // =============================== Video List ===============================
-    override fun videoListParse(response: Response): List<Video> = runBlocking {
-        val episodeData = response.parseAs<EpisodeVideoData>()
-        val videoServer = fetchPreferredVideoServer()
+    // Response-based hoster parsing is never used: the video servers are resolved
+    // from suspend methods against the API instead.
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    private suspend fun fetchEpisodeVideoData(episode: SEpisode): EpisodeVideoData {
+        val path = if (episode.url.startsWith("http")) {
+            episode.url.toHttpUrl().encodedPath
+        } else {
+            episode.url
+        }
+        return client.newCall(
+            GET(
+                apiSite.toHttpUrl().newBuilder()
+                    .addPathSegments(path.removePrefix("/"))
+                    .build(),
+            ),
+        ).awaitSuccess().parseAs<EpisodeVideoData>()
+    }
+
+    // One Hoster per dubbing team so that switching the audio track in the player
+    // actually switches the stream: the app switches hosters, while the videos
+    // inside a hoster are the qualities of that one team.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeData = fetchEpisodeVideoData(episode)
         val teams = preferences.getString(PREF_DUB_TEAM_KEY, "")?.split(',')
+
+        val ignoreSubs = preferences.getBoolean(PREF_IGNORE_SUBS_KEY, PREF_IGNORE_SUBS_DEFAULT)
+        val useMaxQuality = preferences.getBoolean(
+            PREF_USE_MAX_QUALITY_KEY,
+            PREF_USE_MAX_QUALITY_DEFAULT,
+        )
 
         val preferredTeams = episodeData.data.players?.filter { videoInfo ->
             teams.isNullOrEmpty() || teams.any { videoInfo.team.name.contains(it.trim(), true) }
         } ?: episodeData.data.players
 
-        val useMaxQuality = preferences.getBoolean(
-            PREF_USE_MAX_QUALITY_KEY,
-            PREF_USE_MAX_QUALITY_DEFAULT,
-        )
-        val videoInfoList = preferredTeams?.filter { videoInfo ->
-            val quality = bestQuality(videoInfo)
-            val noneBetter = preferredTeams.none {
-                bestQuality(it) > quality && it.team.name == videoInfo.team.name
+        // Keep only the best-quality player per team unless the user opted out, and
+        // optionally drop subtitle-only translations.
+        val visibleTeams = preferredTeams.orEmpty()
+            .filter { entry -> !(ignoreSubs && entry.translationInfo.id == 1) }
+            .filter { entry ->
+                val quality = bestQuality(entry)
+                useMaxQuality.not() || preferredTeams.orEmpty().none {
+                    bestQuality(it) > quality && it.team.name == entry.team.name
+                }
             }
 
-            noneBetter || !useMaxQuality
-        } ?: preferredTeams
-
-        val ignoreSubs = preferences.getBoolean(PREF_IGNORE_SUBS_KEY, PREF_IGNORE_SUBS_DEFAULT)
-
-        return@runBlocking videoInfoList?.parallelCatchingFlatMap { videoInfo ->
-            if (ignoreSubs && videoInfo.translationInfo.id == 1) {
-                return@parallelCatchingFlatMap emptyList()
+        // The episode's API path rides along in internalData so getVideoList(hoster)
+        // can re-query the same endpoint ("id|path").
+        val episodePath = if (episode.url.startsWith("http")) {
+            episode.url.toHttpUrl().encodedPath
+        } else {
+            episode.url
+        }
+        return visibleTeams
+            .groupBy { it.team.name }
+            .map { (teamName, players) ->
+                val best = players.maxByOrNull { bestQuality(it) } ?: players.first()
+                val isSubsTeam = SUBTITLES_TEAM_REGEX.containsMatchIn(teamName) ||
+                    players.all { it.translationInfo.id == 1 }
+                Hoster(
+                    hosterName = if (isSubsTeam && !teamName.contains("Субтитры", ignoreCase = true)) {
+                        "$teamName (Субтитры)"
+                    } else {
+                        teamName
+                    },
+                    internalData = "${best.id}|$episodePath",
+                )
             }
+            .sortedBy { hoster -> SUBTITLES_TEAM_REGEX.containsMatchIn(hoster.hosterName) }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        // internalData format: "<player entry id>|<api episode path>"
+        val entryId = hoster.internalData.substringBefore('|').toIntOrNull()
+            ?: return emptyList()
+        val episodePath = hoster.internalData.substringAfter('|', "")
+            .takeIf { it.isNotBlank() }
+            ?: return emptyList()
+
+        val episodeData = client.newCall(
+            GET(
+                apiSite.toHttpUrl().newBuilder()
+                    .addPathSegments(episodePath.removePrefix("/"))
+                    .build(),
+            ),
+        ).awaitSuccess().parseAs<EpisodeVideoData>()
+
+        val videoInfos = episodeData.data.players.orEmpty()
+            .filter { it.id == entryId }
+
+        val videoServer = fetchPreferredVideoServer()
+
+        return videoInfos.parallelCatchingFlatMap { videoInfo ->
             val playerName = videoInfo.player.lowercase()
             when (playerName) {
                 "kodik" -> kodikVideoLinks(videoInfo.src, videoInfo.team.name)
                 "animelib" -> animelibVideoLinks(videoInfo, videoServer)
                 else -> emptyList()
             }
-        } ?: emptyList()
-    }
-
-    override fun videoListRequest(episode: SEpisode): Request {
-        val path = if (episode.url.startsWith("http")) {
-            episode.url.toHttpUrl().encodedPath
-        } else {
-            episode.url
         }
-        return GET(
-            apiSite.toHttpUrl().newBuilder()
-                .addPathSegments(path.removePrefix("/"))
-                .build(),
-        )
     }
 
     // =============================== Latest ===============================
