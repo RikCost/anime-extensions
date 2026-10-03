@@ -2,6 +2,7 @@ ext {
     extName = 'OtakusTV'
     extClass = '.OtakusTV'
     extVersionCode = 1
+    libVersion = "16"
     isNsfw = true
 }
 
