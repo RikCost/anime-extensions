@@ -229,16 +229,12 @@ class YummyAnime :
                 playerUrl,
                 "$baseUrl/",
                 prefix = dubbing,
-                episodePlaybackIdentity = playerUrl,
             ).map { extracted ->
-                // Rebuilt via the constructor, not copy(): the runtime Video class may differ
-                // from the compile-time stub and a failing copy() silently drops the entry.
                 Video(
-                    url = playerUrl,
                     // The extractor's own title carries the rendition; rebuilding it here
                     // would drop the quality, and applyQualityPreference could not rank it.
-                    quality = extracted.videoTitle,
                     videoUrl = extracted.videoUrl,
+                    videoTitle = extracted.videoTitle,
                     headers = extracted.headers,
                     subtitleTracks = if (preferences.getBoolean(PREF_ALLOHA_SUBS_KEY, PREF_ALLOHA_SUBS_DEFAULT)) {
                         extracted.subtitleTracks
@@ -250,10 +246,10 @@ class YummyAnime :
             // Aksor hands the playlist over as JSON, so this costs one plain request instead
             // of a WebView round-trip and its links are not tied to a session — they keep
             // working on the second run of a series, which Alloha's do not.
-            "Aksor" -> aksorVideoLinks(playerUrl, dubbing, playerUrl)
-            "Kodik" -> kodikVideoLinks(playerUrl, dubbing, playerUrl)
-            "VK" -> vkVideoLinks(playerUrl, dubbing, playerUrl)
-            else -> fallbackVideoLinks(playerUrl, dubbing, playerUrl)
+            "Aksor" -> aksorVideoLinks(playerUrl, dubbing)
+            "Kodik" -> kodikVideoLinks(playerUrl, dubbing)
+            "VK" -> vkVideoLinks(playerUrl, dubbing)
+            else -> fallbackVideoLinks(playerUrl, dubbing)
         }
         return videos.let(::applyQualityPreference).let(::voicesBeforeSubtitles)
     }
@@ -277,7 +273,6 @@ class YummyAnime :
     private suspend fun aksorVideoLinks(
         playerUrl: String,
         dubbing: String,
-        episodePlaybackIdentity: String,
     ): List<Video> {
         val videoId = playerUrl.substringBefore('?').substringAfterLast('/').trim()
         if (videoId.isBlank()) return emptyList()
@@ -303,9 +298,8 @@ class YummyAnime :
             // it handed back an empty url. The manifest is a plain DASH one that the player
             // reads natively, so it is passed through as is.
             videos += Video(
-                url = episodePlaybackIdentity,
-                quality = "$dubbing (${qualityLabel(label)}p Aksor)",
                 videoUrl = streamUrl,
+                videoTitle = "$dubbing (${qualityLabel(label)}p Aksor)",
                 headers = headers,
             )
         }
@@ -380,7 +374,6 @@ class YummyAnime :
     private suspend fun kodikVideoLinks(
         iframeUrl: String,
         dubbing: String,
-        episodePlaybackIdentity: String,
     ): List<Video> {
         val kodikHeaders = Headers.Builder()
             .add("Referer", "$baseUrl/")
@@ -503,7 +496,7 @@ class YummyAnime :
                     Base64.decode(base64Url, Base64.DEFAULT).toString(Charsets.UTF_8)
                 }.getOrNull()?.fixProtocol() ?: return@flatMap emptyList()
 
-                buildKodikVideos(hlsUrl, qualityName, dubbing, hlsHeaders, episodePlaybackIdentity)
+                buildKodikVideos(hlsUrl, qualityName, dubbing, hlsHeaders)
             }
         }
     }
@@ -513,7 +506,6 @@ class YummyAnime :
         qualityName: String,
         dubbing: String,
         hlsHeaders: Headers,
-        episodePlaybackIdentity: String,
     ): List<Video> = if (hlsUrl.contains(".mpd")) {
         PlaylistUtils(client, headers).extractFromDash(
             hlsUrl,
@@ -524,9 +516,8 @@ class YummyAnime :
     } else {
         listOf(
             Video(
-                url = episodePlaybackIdentity,
-                quality = "$dubbing (${qualityName}p Kodik)",
                 videoUrl = hlsUrl,
+                videoTitle = "$dubbing (${qualityName}p Kodik)",
                 headers = hlsHeaders,
             ),
         )
@@ -543,7 +534,6 @@ class YummyAnime :
     private suspend fun vkVideoLinks(
         iframeUrl: String,
         dubbing: String,
-        episodePlaybackIdentity: String,
     ): List<Video> {
         val id = runCatching { iframeUrl.toHttpUrl().queryParameter("id") }.getOrNull() ?: return emptyList()
         val parts = id.split("_", limit = 2)
@@ -555,7 +545,7 @@ class YummyAnime :
         // hoster down — the other player paths already degrade to an empty list.
         return runCatching { vkExtractor.videosFromUrl(embedUrl, prefix = "$dubbing (VK) ") }
             .getOrDefault(emptyList())
-            .map { Video(episodePlaybackIdentity, it.videoTitle, it.videoUrl, it.headers) }
+            .map { Video(videoUrl = it.videoUrl, videoTitle = it.videoTitle, headers = it.headers) }
     }
 
     // =========================== Fallback Player =============================
@@ -563,7 +553,6 @@ class YummyAnime :
     private suspend fun fallbackVideoLinks(
         iframeUrl: String,
         dubbing: String,
-        episodePlaybackIdentity: String,
     ): List<Video> {
         val body = runCatching {
             client.get(iframeUrl, headers).bodyString()
@@ -613,9 +602,8 @@ class YummyAnime :
 
         return listOf(
             Video(
-                url = episodePlaybackIdentity,
-                quality = "$dubbing (Unknown)",
                 videoUrl = stream,
+                videoTitle = "$dubbing (Unknown)",
                 headers = videoHeaders,
             ),
         )
@@ -624,8 +612,6 @@ class YummyAnime :
     // ============================= Utilities ==============================
 
     private fun String.fixProtocol(): String = if (startsWith("//")) "https:$this" else this
-
-    private fun episodePlaybackIdentity(episode: SEpisode): String = "$baseUrl/episode/${episode.url.replace("|", "/")}"
 
     private fun String.toOrigin(): String = ORIGIN_REGEX.find(this)?.groupValues?.get(1) ?: this
 

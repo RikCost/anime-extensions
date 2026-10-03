@@ -72,7 +72,6 @@ class AllohaExtractor(private val client: OkHttpClient) {
         iframeUrl: String,
         @Suppress("UNUSED_PARAMETER") siteUrl: String,
         prefix: String = "Alloha",
-        episodePlaybackIdentity: String? = null,
         cacheKey: String? = null,
     ): List<Video> {
         val playerUrl = normalizeUrl(iframeUrl)
@@ -95,7 +94,7 @@ class AllohaExtractor(private val client: OkHttpClient) {
             EXTRACTION_SEMAPHORE.acquire()
             val videos = try {
                 cachedVideos(key)
-                    ?: extract(playerUrl, prefix, episodePlaybackIdentity).also {
+                    ?: extract(playerUrl, prefix).also {
                         if (it.isNotEmpty()) {
                             cache[key] = System.currentTimeMillis() to it
                         }
@@ -120,7 +119,6 @@ class AllohaExtractor(private val client: OkHttpClient) {
     private fun extract(
         playerUrl: String,
         prefix: String,
-        episodePlaybackIdentity: String?,
     ): List<Video> {
         val playbackHeaders = playbackHeaders(playerUrl)
 
@@ -304,9 +302,8 @@ class AllohaExtractor(private val client: OkHttpClient) {
             } else {
                 listOf(
                     Video(
-                        url = episodePlaybackIdentity ?: playerUrl,
-                        quality = "$prefix (Alloha)",
                         videoUrl = streamUrl,
+                        videoTitle = "$prefix (Alloha)",
                         headers = playbackHeaders,
                         subtitleTracks = deliveredSubs.get().mapIndexed { index, subUrl ->
                             Track(subUrl, subtitleLabel(subUrl, index))
