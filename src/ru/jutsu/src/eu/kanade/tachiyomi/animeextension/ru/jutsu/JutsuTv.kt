@@ -48,6 +48,8 @@ class JutsuTv :
 
     private val preferences by getPreferencesLazy()
 
+    private val allohaExtractor by lazy { AllohaExtractor(client, headers, baseUrl) }
+
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
@@ -267,13 +269,19 @@ class JutsuTv :
 
         val playerUrl = fetchKodikPlayerUrl(document, anime.url)
 
+        // The anime id rides along in the fragment so that the hoster list can also look up
+        // the Alloha player; OkHttp never sends fragments to Kodik.
+        val animeId = document.selectFirst(".tabs-block[data-player-anime-id]")
+            ?.attr("data-player-anime-id")
+        val fragment = animeId?.let { "#$it" }.orEmpty()
+
         // Movies and single videos: anything that is not a serial.
         if (!playerUrl.contains("/serial/")) {
             return listOf(
                 SEpisode.create().apply {
                     name = "Фильм"
                     episode_number = 1F
-                    url = playerUrl
+                    url = playerUrl + fragment
                 },
             )
         }
@@ -298,7 +306,7 @@ class JutsuTv :
             SEpisode.create().apply {
                 name = "Серия $ep"
                 episode_number = ep.toFloat()
-                url = "$playerUrl${separator}episode=$ep"
+                url = "$playerUrl${separator}episode=$ep$fragment"
             }
         }
     }
@@ -318,22 +326,35 @@ class JutsuTv :
             ?.attr("data-player-slot")
             ?: throw Exception("Плеер Kodik не найден на странице")
 
+        return fetchPlayer(animeId, slot, "$baseUrl$animeUrl")?.src?.takeIf { it.isNotBlank() }
+            ?.fixProtocol()
+            ?: throw Exception("Kodik плеер недоступен для этого тайтла")
+    }
+
+    // Slots past the last player answer {"status":false,"data":"not found"}.
+    private suspend fun fetchPlayer(animeId: String, slot: String, referer: String): PlayerData? {
         val ajaxHeaders = headers.newBuilder()
-            .set("Referer", "$baseUrl$animeUrl")
+            .set("Referer", referer)
             .set("X-Requested-With", "XMLHttpRequest")
             .build()
 
-        val playerResponse = client.get(
+        val response = client.get(
             "$baseUrl/engine/ajax/controller.php?mod=player&id=$animeId&slot=$slot",
             ajaxHeaders,
-        ).parseAs<PlayerResponse>()
+        )
+        return runCatching { response.parseAs<PlayerResponse>() }.getOrNull()
+            ?.takeIf { it.status }
+            ?.data
+    }
 
-        val playerUrl = playerResponse.data?.src
-        if (!playerResponse.status || playerUrl.isNullOrBlank()) {
-            throw Exception("Kodik плеер недоступен для этого тайтла")
+    private suspend fun fetchAllohaPlayerUrl(animeId: String): String? {
+        for (slot in 0 until MAX_PLAYER_SLOTS) {
+            val player = fetchPlayer(animeId, slot.toString(), "$baseUrl/") ?: return null
+            if (player.name.contains("Alloha", ignoreCase = true) && player.src.isNotBlank()) {
+                return player.src.fixProtocol()
+            }
         }
-
-        return playerUrl.fixProtocol()
+        return null
     }
 
     // =============================== Videos ===============================
@@ -342,11 +363,29 @@ class JutsuTv :
     // actually switches the stream: the app switches hosters, while the videos inside a
     // hoster are just the qualities of that one dubbing.
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
-        val requestUrl = episode.url.toHttpUrl()
+        // Episodes saved before the Alloha player was supported carry no anime id.
+        val kodikUrl = episode.url.substringBefore('#')
+        val animeId = episode.url.substringAfter('#', "").takeIf { it.isNotEmpty() }
+        val episodeNum = kodikUrl.toHttpUrl().queryParameter("episode")?.toIntOrNull()
+
+        val kodikHosters = runCatching { kodikHosters(kodikUrl) }
+        val allohaHosters = animeId?.let { id ->
+            runCatching {
+                fetchAllohaPlayerUrl(id)?.let { allohaExtractor.hostersFromUrl(it, episodeNum) }
+            }.getOrNull()
+        }.orEmpty()
+
+        // Only surface the Kodik error when Alloha has nothing to offer either.
+        if (allohaHosters.isEmpty()) return kodikHosters.getOrThrow()
+        return kodikHosters.getOrDefault(emptyList()) + allohaHosters
+    }
+
+    private suspend fun kodikHosters(episodeUrl: String): List<Hoster> {
+        val requestUrl = episodeUrl.toHttpUrl()
         val episodeNum = requestUrl.queryParameter("episode")?.toIntOrNull()
         val isSerial = requestUrl.encodedPath.startsWith("/serial/")
         val playerHost = requestUrl.host
-        val document = fetchKodikDocument(episode.url)
+        val document = fetchKodikDocument(episodeUrl)
 
         val translations = document.select(
             "div.serial-translations-box option, div.movie-translations-box option",
@@ -354,7 +393,7 @@ class JutsuTv :
 
         // Single translation — the episode URL itself is the player page.
         if (translations.isEmpty()) {
-            return listOf(Hoster(hosterName = "Kodik", internalData = episode.url))
+            return listOf(Hoster(hosterName = "Kodik", internalData = episodeUrl))
         }
 
         // Carry the signed urlParams over so Kodik actually serves the requested dubbing:
@@ -399,7 +438,14 @@ class JutsuTv :
         }
     }.getOrDefault("")
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> = applyQualityPreference(kodikVideoLinks(hoster.internalData, hoster.hosterName))
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val videos = if (AllohaExtractor.isAllohaHoster(hoster.internalData)) {
+            allohaExtractor.videosFromHoster(hoster.internalData)
+        } else {
+            kodikVideoLinks(hoster.internalData, hoster.hosterName)
+        }
+        return applyQualityPreference(videos)
+    }
 
     // Voice-overs before subtitles now applies to the hoster (audio track) list.
     override fun List<Hoster>.sortHosters(): List<Hoster> = sortedBy { it.hosterName.contains("Субтитры", ignoreCase = true) }
@@ -620,6 +666,7 @@ class JutsuTv :
     companion object {
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "1080"
+        private const val MAX_PLAYER_SLOTS = 4
 
         private val EP_COUNT_REGEX = Regex("""\((\d+)\s*эп""")
         private val STATUS_REGEX = Regex("""Статус:\s*([А-Яа-яёЁ]+)""")

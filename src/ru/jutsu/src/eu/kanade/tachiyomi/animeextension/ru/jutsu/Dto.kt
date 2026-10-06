@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.animeextension.ru.jutsu
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 @Serializable
 class PlayerResponse(
@@ -40,3 +41,36 @@ class KodikVideoQuality(
 
 @Serializable
 class KodikData(val links: KodikVideoQuality)
+
+// "all" is season -> episode -> translation -> file for serials, translation -> file otherwise.
+@Serializable
+class AllohaFileList(
+    val type: String,
+    val active: AllohaFile? = null,
+    val all: JsonElement,
+)
+
+@Serializable
+class AllohaFile(
+    val id: Long,
+    val translation: String,
+)
+
+@Serializable
+class AllohaStreams(
+    val hlsSource: List<AllohaSource> = emptyList(),
+    val tracks: List<AllohaTrack> = emptyList(),
+)
+
+@Serializable
+class AllohaSource(
+    val label: String,
+    val quality: Map<String, String>,
+    val default: Boolean = false,
+)
+
+@Serializable
+class AllohaTrack(
+    val label: String,
+    val src: String,
+)
