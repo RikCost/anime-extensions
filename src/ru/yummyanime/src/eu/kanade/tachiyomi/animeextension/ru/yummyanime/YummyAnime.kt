@@ -27,6 +27,7 @@ import keiyoushi.utils.useAsJsoup
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 
@@ -195,7 +196,14 @@ class YummyAnime :
      * control characters) is what is safe to store. The Alloha token lives on the whole series
      * (only `&episode=` differs between entries), so it does not go stale per entry.
      */
-    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = episodeVideos(episode).mapNotNull { video ->
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val videos = episodeVideos(episode)
+        val (cvh, others) = videos.partition { playerOf(it.iframeUrl?.fixProtocol().orEmpty()) == "CVH" }
+        val cvhHosters = runCatching { cvhHosters(cvh) }.getOrDefault(emptyList())
+        return playerHosters(others) + cvhHosters
+    }
+
+    private fun playerHosters(videos: List<YummyVideoDto>): List<Hoster> = videos.mapNotNull { video ->
         val player = video.data?.player?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
         if (player.contains("Alloha", ignoreCase = true) &&
             !preferences.getBoolean(PREF_ALLOHA_KEY, PREF_ALLOHA_DEFAULT)
@@ -247,6 +255,7 @@ class YummyAnime :
             // of a WebView round-trip and its links are not tied to a session — they keep
             // working on the second run of a series, which Alloha's do not.
             "Aksor" -> aksorVideoLinks(playerUrl, dubbing)
+            "CVH" -> cvhVideoLinks(playerUrl, dubbing)
             "Kodik" -> kodikVideoLinks(playerUrl, dubbing)
             "VK" -> vkVideoLinks(playerUrl, dubbing)
             else -> fallbackVideoLinks(playerUrl, dubbing)
@@ -306,9 +315,76 @@ class YummyAnime :
         return videos
     }
 
+    /**
+     * The site lists one "Плеер CVH" entry per dubbing it knows of. They all open the same
+     * `iframeCVH.html` wrapper, which only passes the dubbing to the player as a preference,
+     * so what plays is whatever the CVH playlist holds for the episode: a video whose studio
+     * matches the dubbing when there is one, otherwise the episode's voiced video (often a
+     * single "Многоголосый" one). The site's names are kept so the list matches the site;
+     * subtitled videos, which the site does not list under CVH, are added on top.
+     *
+     * The wrapper hands the player `data-publisher-id=745`, `data-aggregator=mali` and the
+     * `anime_id`/`episode` of the wrapper url; the playlist endpoint takes them as is.
+     */
+    private suspend fun cvhHosters(entries: List<YummyVideoDto>): List<Hoster> {
+        val wrappers = entries.mapNotNull { entry ->
+            entry.iframeUrl?.fixProtocol()?.toHttpUrlOrNull()?.let { entry to it }
+        }
+        val url = wrappers.firstOrNull()?.second ?: return emptyList()
+        val titleId = url.queryParameter("anime_id")?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val episode = url.queryParameter("episode")?.toIntOrNull()
+
+        val items = client.get(
+            "$CVH_API/player/sv/playlist?pub=$CVH_PUBLISHER_ID&aggr=$CVH_AGGREGATOR&id=$titleId",
+            cvhHeaders,
+        ).parseAs<CvhPlaylist>().items
+            .filter { episode == null || it.episode == episode }
+            .distinctBy { it.vkId }
+        val (subtitled, voiced) = items.partition { it.voiceType.equals("Субтитры", ignoreCase = true) }
+
+        fun hoster(name: String, item: CvhItem): Hoster {
+            val videoUrl = "$CVH_API/player/sv/video/${item.vkId}"
+            return Hoster(hosterUrl = videoUrl, hosterName = "$name (CVH)", internalData = videoUrl)
+        }
+
+        val dubbings = wrappers.mapNotNull { (entry, wrapper) ->
+            val code = wrapper.queryParameter("dubbing_code").orEmpty()
+            val item = voiced.firstOrNull { it.voiceStudio.equals(code, ignoreCase = true) }
+                ?: voiced.firstOrNull()
+                ?: return@mapNotNull null
+            hoster(entry.data?.dubbing?.takeIf { it.isNotBlank() } ?: code.ifBlank { "Озвучка" }, item)
+        }
+        return dubbings + subtitled.map { hoster(it.voiceType ?: "Субтитры", it) }
+    }
+
+    /** Progressive mp4 renditions from okcdn; the links are bound to the requesting IP. */
+    private suspend fun cvhVideoLinks(videoUrl: String, dubbing: String): List<Video> {
+        val sources = runCatching {
+            client.get(videoUrl, cvhHeaders).parseAs<CvhVideo>().sources
+        }.getOrElse { return emptyList() }
+
+        val streamHeaders = Headers.Builder()
+            .add("Referer", "https://player.cdnvideohub.com/")
+            .build()
+
+        return sources.renditions().map { (quality, url) ->
+            Video(
+                videoUrl = url,
+                videoTitle = "$dubbing (${quality}p CVH)",
+                headers = streamHeaders,
+            )
+        }
+    }
+
+    private val cvhHeaders by lazy {
+        Headers.Builder()
+            .add("Accept", "application/json")
+            .build()
+    }
+
     /** One byte of the manifest: enough to tell a served file from a dead path, cheap to fetch. */
     private suspend fun isStreamAlive(url: String): Boolean = runCatching {
-        client.get(url, headers.newBuilder().add("Range", "bytes=0-0").build()).isSuccessful
+        client.get(url, headers.newBuilder().add("Range", "bytes=0-0").build()).use { it.isSuccessful }
     }.getOrDefault(false)
 
     /** "q1080" -> "1080", "q2k" -> "2160", "q4k" -> "3840". */
@@ -321,6 +397,7 @@ class YummyAnime :
     private fun playerShortName(player: String): String = when {
         player.contains("Alloha", ignoreCase = true) -> "Alloha"
         player.contains("Aksor", ignoreCase = true) -> "Aksor"
+        player.contains("CVH", ignoreCase = true) -> "CVH"
         player.contains("Kodik", ignoreCase = true) -> "Kodik"
         player.contains("VK", ignoreCase = true) -> "VK"
         else -> player.trim()
@@ -332,6 +409,8 @@ class YummyAnime :
         return when {
             "alloha." in host -> "Alloha"
             "aksor." in host -> "Aksor"
+            // The site's own wrapper page for the player, and the player API it is turned into.
+            "cdnvideohub." in host || "/iframeCVH" in playerUrl -> "CVH"
             "kodik" in host -> "Kodik"
             "vk" in host -> "VK"
             else -> ""
@@ -617,6 +696,9 @@ class YummyAnime :
 
     companion object {
         private const val AKSOR_API = "https://player.aksor.tv/api"
+        private const val CVH_API = "https://plapi.cdnvideohub.com/api/v1"
+        private const val CVH_PUBLISHER_ID = 745
+        private const val CVH_AGGREGATOR = "mali"
 
         private const val PREF_QUALITY_KEY = "pref_quality"
         private const val PREF_QUALITY_DEFAULT = "720"
