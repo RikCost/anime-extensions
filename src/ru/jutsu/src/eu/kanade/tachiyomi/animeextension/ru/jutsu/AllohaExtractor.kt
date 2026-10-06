@@ -1,29 +1,44 @@
 package eu.kanade.tachiyomi.animeextension.ru.jutsu
 
+import android.annotation.SuppressLint
+import android.app.Application
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.network.GET
 import keiyoushi.network.get
-import keiyoushi.network.post
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
-import okhttp3.CacheControl
-import okhttp3.FormBody
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import org.jsoup.Jsoup
-import java.security.MessageDigest
+import uy.kohesive.injekt.injectLazy
+import java.io.ByteArrayInputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Alloha player (`*.thealloha.club`).
  *
  * The iframe page carries the whole translation tree in `fileList`, and the streams of one
- * translation are returned by `POST /bnsi/movies/<fileId>`. That request is signed with the
- * `Borth` header: `<fingerprint sha256>|<payload>`, where the payload is the content of
- * `<meta name="viewporti">` run through three fixed character permutations. The payload is
- * single-use, so every stream request needs a freshly loaded iframe page.
+ * translation are returned by `POST /bnsi/movies/<fileId>`, signed with a single-use value
+ * hidden in the page. The server tells real browsers from HTTP clients — OkHttp gets a
+ * normal-looking answer whose stream links all fail with 403 — so the request has to come
+ * from a browser network stack.
+ *
+ * A hidden [WebView] therefore loads the player the way jutsu.tv embeds it, and lets the
+ * player sign and send the request itself. A small hook, prepended to the one player script
+ * that is not covered by Subresource Integrity, points that request at the wanted file and
+ * hands the response back through a JavaScript interface.
  */
 class AllohaExtractor(
     private val client: OkHttpClient,
@@ -31,18 +46,12 @@ class AllohaExtractor(
     private val siteUrl: String,
 ) {
 
+    private val context: Application by injectLazy()
+
     private val pageHeaders by lazy {
         headers.newBuilder()
             .set("Referer", "$siteUrl/")
             .build()
-    }
-
-    // The player sends a sha256 of its browser fingerprint; the server cannot verify it,
-    // it only has to look like one.
-    private val fingerprint by lazy {
-        MessageDigest.getInstance("SHA-256")
-            .digest(headers["User-Agent"].orEmpty().toByteArray())
-            .joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -52,13 +61,11 @@ class AllohaExtractor(
      */
     suspend fun hostersFromUrl(iframeUrl: String, episode: Int?): List<Hoster> {
         val url = iframeUrl.toHttpUrl()
-        val token = url.queryParameter("token") ?: return emptyList()
         val origin = "${url.scheme}://${url.host}"
 
-        val fileList = fetchPage(iframeUrl).fileList ?: return emptyList()
-        val streams = fileList.filesFor(episode).parallelCatchingMapNotNull { file ->
-            fetchStreams(iframeUrl, origin, token, file.id)
-        }
+        val fileList = fetchFileList(iframeUrl) ?: return emptyList()
+        val streams = fetchStreams(iframeUrl, fileList.filesFor(episode).map { it.id })
+        if (streams.isEmpty()) return emptyList()
 
         // The CDN rejects playlist, segment and subtitle requests without the player's Origin.
         val videoHeaders = headers.newBuilder()
@@ -91,31 +98,114 @@ class AllohaExtractor(
             }
     }
 
-    private suspend fun fetchStreams(iframeUrl: String, origin: String, token: String, fileId: Long): AllohaStreams? {
-        val payload = fetchPage(iframeUrl).signature ?: return null
-
-        val apiHeaders = headers.newBuilder()
-            .set("Referer", iframeUrl)
-            .set("Origin", origin)
-            .set("X-Requested-With", "XMLHttpRequest")
-            .set("Borth", "$fingerprint|$payload")
-            .build()
-
-        val body = FormBody.Builder()
-            .add("token", token)
-            .add("av1", "false")
-            .add("autoplay", "0")
-            .add("audio", "")
-            .add("subtitle", "")
-            .build()
-
-        val response = client.post("$origin/bnsi/movies/$fileId", apiHeaders, body, ensureSuccess = false)
-        if (!response.isSuccessful) {
-            response.close()
-            return null
-        }
-        return response.parseAs<AllohaStreams>()
+    private suspend fun fetchFileList(iframeUrl: String): AllohaFileList? {
+        val html = client.get(iframeUrl, pageHeaders).bodyString()
+        return FILE_LIST_REGEX.find(html)?.groupValues?.get(1)
+            ?.replace("\\'", "'")
+            ?.let { runCatching { it.parseAs<AllohaFileList>() }.getOrNull() }
     }
+
+    private fun AllohaFileList.filesFor(episode: Int?): List<AllohaFile> = if (type == "serial") {
+        val seasons = runCatching { all.parseAs<Map<String, Map<String, Map<String, AllohaFile>>>>() }
+            .getOrNull().orEmpty()
+        val key = (episode ?: 1).toString()
+        seasons.entries
+            .sortedBy { it.key.toIntOrNull() ?: Int.MAX_VALUE }
+            .firstNotNullOfOrNull { it.value[key] }
+            ?.values?.toList()
+            .orEmpty()
+    } else {
+        runCatching { all.parseAs<Map<String, AllohaFile>>().values.toList() }
+            .getOrNull()
+            ?: listOfNotNull(active)
+    }
+
+    // ─── WebView ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Loads the player once per file in a single hidden WebView. Every load issues a fresh
+     * signature, which the player spends on the one request the hook redirects.
+     */
+    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+    private suspend fun fetchStreams(iframeUrl: String, fileIds: List<Long>): List<AllohaStreams> {
+        if (fileIds.isEmpty()) return emptyList()
+
+        val results = ConcurrentHashMap<Long, CompletableDeferred<String>>()
+        // Read from the WebView's network thread when the hooked script is requested.
+        val wantedId = AtomicLong()
+        val bridge = Bridge(results)
+
+        val webView = withContext(Dispatchers.Main) {
+            WebView(context).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                headers["User-Agent"]?.let { settings.userAgentString = it }
+                addJavascriptInterface(bridge, BRIDGE_NAME)
+                webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                        if (!request.url.path.orEmpty().endsWith(HOOKED_SCRIPT)) return null
+                        val original = runCatching {
+                            client.newCall(GET(request.url.toString(), headers)).execute().bodyString()
+                        }.getOrDefault("")
+                        val script = hookScript(wantedId.get()) + "\n" + original
+                        return WebResourceResponse(
+                            "application/javascript",
+                            "utf-8",
+                            ByteArrayInputStream(script.toByteArray()),
+                        )
+                    }
+                }
+            }
+        }
+
+        // Embedded like on the site: the page refuses to render outside an iframe, and the
+        // server only serves it with the site as the referrer.
+        val wrapper = """<html><body><iframe src="$iframeUrl" width="640" height="360"></iframe></body></html>"""
+
+        try {
+            return fileIds.mapNotNull { fileId ->
+                val result = CompletableDeferred<String>()
+                results[fileId] = result
+                wantedId.set(fileId)
+                withContext(Dispatchers.Main) {
+                    webView.loadDataWithBaseURL("$siteUrl/", wrapper, "text/html", "utf-8", null)
+                }
+                withTimeoutOrNull(LOAD_TIMEOUT_MS) { result.await() }
+                    ?.let { runCatching { it.parseAs<AllohaStreams>() }.getOrNull() }
+                    ?.takeIf { it.hlsSource.isNotEmpty() }
+            }
+        } finally {
+            withContext(Dispatchers.Main) {
+                webView.stopLoading()
+                webView.destroy()
+            }
+        }
+    }
+
+    private class Bridge(private val results: Map<Long, CompletableDeferred<String>>) {
+        @JavascriptInterface
+        fun onResult(fileId: String, json: String) {
+            fileId.toLongOrNull()?.let { results[it]?.complete(json) }
+        }
+    }
+
+    // Rewrites the player's stream request to the wanted file and reports the answer.
+    private fun hookScript(fileId: Long) = """
+        (function () {
+            var open = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function (method, url) {
+                if (typeof url === 'string' && url.indexOf('/bnsi/movies/') !== -1) {
+                    arguments[1] = url.replace(/\/bnsi\/movies\/\d+/, '/bnsi/movies/$fileId');
+                    this.addEventListener('load', function () {
+                        try { $BRIDGE_NAME.onResult('$fileId', this.responseText); } catch (e) {}
+                    });
+                }
+                return open.apply(this, arguments);
+            };
+        })();
+    """.trimIndent()
+
+    // ─── Audio track labels ──────────────────────────────────────────────────────────
 
     /**
      * Audio labels look like "(Russian) Mega-Anime", "(Russian) Russian (Mega-Anime)",
@@ -150,116 +240,15 @@ class AllohaExtractor(
         }
     }
 
-    private class AllohaPage(val fileList: AllohaFileList?, val signature: String?)
-
-    private suspend fun fetchPage(iframeUrl: String): AllohaPage {
-        // Never cached: the signature in the page is only valid for a single request.
-        val html = client.get(iframeUrl, pageHeaders, CacheControl.FORCE_NETWORK).bodyString()
-
-        val signature = Jsoup.parse(html).selectFirst("meta[name=viewporti]")
-            ?.attr("content")
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { primeStepShuffle(trailingZerosShuffle(bitLengthShuffle(it))) }
-
-        val fileList = FILE_LIST_REGEX.find(html)?.groupValues?.get(1)
-            ?.replace("\\'", "'")
-            ?.let { runCatching { it.parseAs<AllohaFileList>() }.getOrNull() }
-
-        return AllohaPage(fileList, signature)
-    }
-
-    private fun AllohaFileList.filesFor(episode: Int?): List<AllohaFile> = if (type == "serial") {
-        val seasons = runCatching { all.parseAs<Map<String, Map<String, Map<String, AllohaFile>>>>() }
-            .getOrNull().orEmpty()
-        val key = (episode ?: 1).toString()
-        seasons.entries
-            .sortedBy { it.key.toIntOrNull() ?: Int.MAX_VALUE }
-            .firstNotNullOfOrNull { it.value[key] }
-            ?.values?.toList()
-            .orEmpty()
-    } else {
-        runCatching { all.parseAs<Map<String, AllohaFile>>().values.toList() }
-            .getOrNull()
-            ?: listOfNotNull(active)
-    }
-
-    // ─── Signature permutations (ported from the player's bundle) ────────────────────
-
-    // Characters are bucketed by the bit length of their index; buckets are laid out from
-    // the longest bit length down to zero.
-    private fun bitLengthShuffle(s: String): String = bucketShuffle(s, descending = true) { i ->
-        32 - Integer.numberOfLeadingZeros(i)
-    }
-
-    // Characters are bucketed by the number of trailing zero bits of their index (index 0
-    // goes to the last bucket); buckets are laid out in ascending order.
-    private fun trailingZerosShuffle(s: String): String {
-        val k = bitsFor(s.length)
-        return bucketShuffle(s, descending = false) { i ->
-            if (i == 0) k else Integer.numberOfTrailingZeros(i)
-        }
-    }
-
-    private inline fun bucketShuffle(s: String, descending: Boolean, bucketOf: (Int) -> Int): String {
-        val n = s.length
-        if (n <= 1) return s
-        val k = bitsFor(n)
-
-        val counts = IntArray(k + 1)
-        for (i in 0 until n) counts[bucketOf(i)]++
-
-        val starts = IntArray(k + 1)
-        var pos = 0
-        for (w in if (descending) k downTo 0 else 0..k) {
-            starts[w] = pos
-            pos += counts[w]
-        }
-
-        return buildString(n) {
-            for (i in 0 until n) append(s[starts[bucketOf(i)]++])
-        }
-    }
-
-    private fun bitsFor(n: Int): Int {
-        var k = 0
-        while (1 shl k < n) k++
-        return k
-    }
-
-    // Walks the indices with a step of 2 modulo the smallest prime above the length; the
-    // i-th character of the input goes to the i-th visited index.
-    private fun primeStepShuffle(s: String): String {
-        val n = s.length
-        if (n <= 1) return s
-        var p = maxOf(2, n + 1)
-        while (!p.isPrime()) p++
-
-        val out = CharArray(n)
-        val used = BooleanArray(n)
-        var step = 0
-        var i = 0
-        while (i < n) {
-            step = (step + 2) % p
-            if (step < n && !used[step]) {
-                used[step] = true
-                out[step] = s[i++]
-            }
-        }
-        return String(out)
-    }
-
-    private fun Int.isPrime(): Boolean {
-        if (this < 2) return false
-        if (this % 2 == 0) return this == 2
-        var d = 3
-        while (d * d <= this) {
-            if (this % d == 0) return false
-            d += 2
-        }
-        return true
-    }
-
     companion object {
+        private const val BRIDGE_NAME = "JutsuAllohaBridge"
+
+        // Loaded synchronously before the player bundle and, unlike it, not pinned by an
+        // integrity hash, so a hook prepended to it runs before the player starts.
+        private const val HOOKED_SCRIPT = "rmp-vast.min.js"
+
+        private const val LOAD_TIMEOUT_MS = 20_000L
+
         // Russian dubs get no prefix, like the Kodik ones next to them.
         private val LANGUAGE_NAMES = mapOf(
             "Russian" to "",

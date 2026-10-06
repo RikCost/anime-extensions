@@ -440,7 +440,7 @@ class JutsuTv :
         }
     }.getOrDefault("")
 
-    // Alloha hosters come with their videos already resolved; this only serves Kodik.
+    // Alloha hosters come with their video list already filled in; this only serves Kodik.
     override suspend fun getVideoList(hoster: Hoster): List<Video> = applyQualityPreference(kodikVideoLinks(hoster.internalData, hoster.hosterName))
 
     // Voice-overs before subtitles now applies to the hoster (audio track) list.
