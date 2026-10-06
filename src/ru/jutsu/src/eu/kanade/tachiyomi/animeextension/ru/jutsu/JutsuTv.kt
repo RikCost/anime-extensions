@@ -373,7 +373,9 @@ class JutsuTv :
             runCatching {
                 fetchAllohaPlayerUrl(id)?.let { allohaExtractor.hostersFromUrl(it, episodeNum) }
             }.getOrNull()
-        }.orEmpty()
+        }.orEmpty().map { hoster ->
+            Hoster(hosterName = hoster.hosterName, videoList = hoster.videoList?.let(::applyQualityPreference))
+        }
 
         // Only surface the Kodik error when Alloha has nothing to offer either.
         if (allohaHosters.isEmpty()) return kodikHosters.getOrThrow()
@@ -438,14 +440,8 @@ class JutsuTv :
         }
     }.getOrDefault("")
 
-    override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val videos = if (AllohaExtractor.isAllohaHoster(hoster.internalData)) {
-            allohaExtractor.videosFromHoster(hoster.internalData)
-        } else {
-            kodikVideoLinks(hoster.internalData, hoster.hosterName)
-        }
-        return applyQualityPreference(videos)
-    }
+    // Alloha hosters come with their videos already resolved; this only serves Kodik.
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = applyQualityPreference(kodikVideoLinks(hoster.internalData, hoster.hosterName))
 
     // Voice-overs before subtitles now applies to the hoster (audio track) list.
     override fun List<Hoster>.sortHosters(): List<Hoster> = sortedBy { it.hosterName.contains("Субтитры", ignoreCase = true) }

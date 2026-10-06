@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingMapNotNull
 import keiyoushi.utils.parseAs
 import okhttp3.CacheControl
 import okhttp3.FormBody
@@ -44,24 +45,54 @@ class AllohaExtractor(
             .joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * One hoster per distinct audio track. A translation in `fileList` is really a file with
+     * several muxed audio tracks, and the same track shows up in several files, so every file
+     * is fetched up front and the tracks are merged by language and name.
+     */
     suspend fun hostersFromUrl(iframeUrl: String, episode: Int?): List<Hoster> {
-        val fileList = fetchPage(iframeUrl).fileList ?: return emptyList()
-        return fileList.filesFor(episode).map { file ->
-            Hoster(
-                hosterName = "${file.translation} (Alloha)",
-                internalData = "$iframeUrl#$FILE_MARKER${file.id}",
-            )
-        }
-    }
-
-    suspend fun videosFromHoster(data: String): List<Video> {
-        val iframeUrl = data.substringBefore("#$FILE_MARKER")
-        val fileId = data.substringAfter("#$FILE_MARKER")
         val url = iframeUrl.toHttpUrl()
         val token = url.queryParameter("token") ?: return emptyList()
         val origin = "${url.scheme}://${url.host}"
 
-        val payload = fetchPage(iframeUrl).signature ?: return emptyList()
+        val fileList = fetchPage(iframeUrl).fileList ?: return emptyList()
+        val streams = fileList.filesFor(episode).parallelCatchingMapNotNull { file ->
+            fetchStreams(iframeUrl, origin, token, file.id)
+        }
+
+        // The CDN rejects playlist, segment and subtitle requests without the player's Origin.
+        val videoHeaders = headers.newBuilder()
+            .set("Referer", "$origin/")
+            .set("Origin", origin)
+            .build()
+
+        // Subtitles are timed to the episode, not to an audio track: offer all of them everywhere.
+        val subtitles = streams.flatMap { it.tracks }
+            .distinctBy { it.label }
+            .map { Track(it.src, it.label) }
+
+        return streams.flatMap { it.hlsSource }
+            .map { AudioTrack.from(it.label) to it }
+            .distinctBy { (track, _) -> track.key }
+            .sortedBy { (track, _) -> track.order }
+            .map { (track, source) ->
+                val videos = source.quality.entries
+                    .sortedByDescending { it.key.toIntOrNull() ?: 0 }
+                    .map { (quality, streamUrl) ->
+                        Video(
+                            videoUrl = streamUrl,
+                            videoTitle = "${track.title} (${quality}p Alloha)",
+                            headers = videoHeaders,
+                            subtitleTracks = subtitles,
+                            initialized = true,
+                        )
+                    }
+                Hoster(hosterName = "${track.title} (Alloha)", videoList = videos)
+            }
+    }
+
+    private suspend fun fetchStreams(iframeUrl: String, origin: String, token: String, fileId: Long): AllohaStreams? {
+        val payload = fetchPage(iframeUrl).signature ?: return null
 
         val apiHeaders = headers.newBuilder()
             .set("Referer", iframeUrl)
@@ -81,29 +112,41 @@ class AllohaExtractor(
         val response = client.post("$origin/bnsi/movies/$fileId", apiHeaders, body, ensureSuccess = false)
         if (!response.isSuccessful) {
             response.close()
-            return emptyList()
+            return null
         }
-        val streams = response.parseAs<AllohaStreams>()
+        return response.parseAs<AllohaStreams>()
+    }
 
-        // The CDN rejects playlist, segment and subtitle requests without the player's Origin.
-        val videoHeaders = headers.newBuilder()
-            .set("Referer", "$origin/")
-            .set("Origin", origin)
-            .build()
+    /**
+     * Audio labels look like "(Russian) Mega-Anime", "(Russian) Russian (Mega-Anime)",
+     * "(Ukrainian) AC-3 20 (192 kb/s) - двоголосий закадровий | QTV" or
+     * "(Japanese) DTS-HD MA 20 (1 670 kb/s) - 元の".
+     */
+    private class AudioTrack(val language: String, val name: String) {
+        val key = "$language|${name.lowercase()}"
 
-        val subtitles = streams.tracks.map { Track(it.src, it.label) }
+        val title = when (val prefix = LANGUAGE_NAMES[language]) {
+            null -> "$language: $name"
+            "" -> name
+            else -> "$prefix: $name"
+        }
 
-        return streams.hlsSource.sortedByDescending { it.default }.flatMap { source ->
-            source.quality.entries
-                .sortedByDescending { it.key.toIntOrNull() ?: 0 }
-                .map { (quality, streamUrl) ->
-                    Video(
-                        videoUrl = streamUrl,
-                        videoTitle = "${source.label} (${quality}p Alloha)",
-                        headers = videoHeaders,
-                        subtitleTracks = subtitles,
-                    )
+        val order = LANGUAGE_ORDER.indexOf(language).takeIf { it >= 0 } ?: LANGUAGE_ORDER.size
+
+        companion object {
+            fun from(label: String): AudioTrack {
+                val match = LABEL_REGEX.matchEntire(label.trim())
+                val language = match?.groupValues?.get(1) ?: ""
+                // Every Japanese track is the original audio, whatever the release calls it.
+                if (language == "Japanese") return AudioTrack(language, "Оригинал")
+
+                var name = (match?.groupValues?.get(2) ?: label).substringAfterLast(" - ").trim()
+                name = name.substringAfter("$language (", "").removeSuffix(")").ifEmpty { name }
+                if (" | " in name) {
+                    name = "${name.substringAfterLast(" | ")} (${name.substringBeforeLast(" | ")})"
                 }
+                return AudioTrack(language, name)
+            }
         }
     }
 
@@ -217,10 +260,16 @@ class AllohaExtractor(
     }
 
     companion object {
-        private const val FILE_MARKER = "alloha="
+        // Russian dubs get no prefix, like the Kodik ones next to them.
+        private val LANGUAGE_NAMES = mapOf(
+            "Russian" to "",
+            "Ukrainian" to "Украинский",
+            "English" to "Английский",
+            "Japanese" to "Японский",
+        )
+        private val LANGUAGE_ORDER = listOf("Russian", "Ukrainian", "English")
 
-        fun isAllohaHoster(data: String) = data.contains("#$FILE_MARKER")
-
+        private val LABEL_REGEX = Regex("""\((\w+)\)\s*(.*)""")
         private val FILE_LIST_REGEX = Regex("""fileList\s*=\s*JSON\.parse\('(.+?)'\);""")
     }
 }
