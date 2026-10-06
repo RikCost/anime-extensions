@@ -338,11 +338,10 @@ class AllohaExtractor(private val client: OkHttpClient) {
                 return it
             }
         }
-        // Nothing verified — return the most recent capture anyway. A single failing
-        // entry is far better than an exception: with the pre-Hoster API one thrown
-        // error hides ALL videos of the episode ("No available videos").
-        Log.w(TAG, "no candidate verified, falling back to last capture")
-        return candidates.lastOrNull()
+        // Nothing verified: offering a link already known to fail would only turn into a
+        // playback error. With hosters an empty result just leaves this dubbing empty.
+        Log.w(TAG, "no candidate verified")
+        return null
     }
 
     private fun resolvePlayable(url: String, headers: Headers, depth: Int): String? {

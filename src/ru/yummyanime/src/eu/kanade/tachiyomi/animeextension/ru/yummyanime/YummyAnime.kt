@@ -237,6 +237,11 @@ class YummyAnime :
                 playerUrl,
                 "$baseUrl/",
                 prefix = dubbing,
+                // The token is the only part that may change between calls; without it the
+                // url still names the series, translation and episode.
+                cacheKey = runCatching {
+                    playerUrl.toHttpUrl().newBuilder().removeAllQueryParameters("token").build().toString()
+                }.getOrNull(),
             ).map { extracted ->
                 Video(
                     // The extractor's own title carries the rendition; rebuilding it here
