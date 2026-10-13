@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.all.yandexdisk
 
-import android.app.AlertDialog
+import android.view.View
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 
@@ -53,21 +53,18 @@ private val HELP_TEXT = """
 
 /**
  * The stubbed [androidx.preference.Preference] has no Context constructor, so an
- * EditTextPreference is used; the click listener handles the tap, so its edit dialog never opens.
+ * EditTextPreference is used. A click listener can't replace its dialog (androidx opens the
+ * dialog before calling the listener), so the help is shown as that dialog's message instead,
+ * with the input field hidden and nothing saved.
  */
 fun PreferenceScreen.addHelpPreference() {
-    val screenContext = context
-    EditTextPreference(screenContext).apply {
+    EditTextPreference(context).apply {
         key = "help_layout"
         title = HELP_TITLE
         summary = "Folders, covers, descriptions, episodes and dubs. Tap to open"
-        setOnPreferenceClickListener {
-            AlertDialog.Builder(screenContext)
-                .setTitle(HELP_TITLE)
-                .setMessage(HELP_TEXT)
-                .setPositiveButton(android.R.string.ok, null)
-                .show()
-            true
-        }
+        dialogTitle = HELP_TITLE
+        dialogMessage = HELP_TEXT
+        setOnBindEditTextListener { it.visibility = View.GONE }
+        setOnPreferenceChangeListener { _, _ -> false }
     }.also(::addPreference)
 }
