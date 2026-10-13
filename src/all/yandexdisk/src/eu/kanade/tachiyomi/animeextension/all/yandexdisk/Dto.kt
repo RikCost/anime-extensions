@@ -56,10 +56,10 @@ class EntryRef(
     /** Folder of the title an episode belongs to, used to find the other qualities of the episode. */
     val root: String? = null,
     /**
-     * Release key shared by sibling folders that hold the same title in different qualities
-     * (`Show.S01.1080p…`, `Show.S01.720p…`). When set, [path] is their parent folder.
+     * Episode key within [root] (see [EpisodeKey]). Set for episodes of a folder title, whose [path]
+     * is then the title folder: the file behind an episode changes when another quality is added.
      */
-    val group: String? = null,
+    val key: String? = null,
 )
 
 /** External audio or subtitle file that belongs to an episode. */
@@ -85,12 +85,8 @@ class DiskEntry(
     val size: Long = 0,
     val modified: Long = 0,
     val publicKey: String? = null,
-    val group: String? = null,
-    /** Folder whose images are used as the cover, when it differs from [path]. */
-    val coverPath: String? = null,
     /** Signed preview link from the REST API; it expires, so it's only used where nothing else works. */
     val preview: String? = null,
 ) {
-    fun toRef(root: String? = null, group: String? = this.group) =
-        EntryRef(path = path, isDir = isDir, publicKey = publicKey, root = root, group = group)
+    fun toRef() = EntryRef(path = path, isDir = isDir, publicKey = publicKey)
 }

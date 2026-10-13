@@ -55,12 +55,12 @@ class YandexDisk : Source() {
     // SimpleDateFormat isn't thread-safe and folders are listed in parallel, so each listing gets its own.
     private fun apiDateFormat() = SimpleDateFormat(API_DATE_PATTERN, Locale.ROOT)
 
-    // WebDAV reports dates in RFC 1123 format.
-    private fun httpDateFormat() = SimpleDateFormat(HTTP_DATE_PATTERN, Locale.ROOT).apply {
+    // WebDAV reports dates in RFC 1123 format, with English day and month names.
+    private fun httpDateFormat() = SimpleDateFormat(HTTP_DATE_PATTERN, Locale.US).apply {
         timeZone = TimeZone.getTimeZone("GMT")
     }
 
-    private val airedDateFormat = SimpleDateFormat(AIRED_DATE_PATTERN, Locale.ROOT)
+    private fun airedDateFormat() = SimpleDateFormat(AIRED_DATE_PATTERN, Locale.ROOT)
 
     override val client = network.client.newBuilder()
         .addInterceptor(::coverInterceptor)
@@ -86,7 +86,10 @@ class YandexDisk : Source() {
 
     // =============================== Search ===============================
 
-    private var searchResults: List<DiskEntry> = emptyList()
+    // Results of the last search; later pages are cut from it. Keyed by the query, so that two
+    // searches running at once (global search) can't serve each other's pages.
+    @Volatile
+    private var searchCache: Pair<String, List<DiskEntry>> = "" to emptyList()
 
     override suspend fun getSearchAnime(
         page: Int,
@@ -99,20 +102,9 @@ class YandexDisk : Source() {
 
         if (query.isBlank()) return getPopularAnime(page)
 
-        if (page == 1) {
-            val entries = publicLinkEntries().toMutableList()
-            if (hasPrivateAccess()) {
-                var listPage = 1
-                while (entries.size < SEARCH_SCAN_LIMIT) {
-                    val (items, hasNextPage) = listEntries(rootPath(), null, listPage, CacheControl.FORCE_NETWORK)
-                    entries += items.toTitles()
-                    if (!hasNextPage) break
-                    listPage++
-                }
-            }
-
-            searchResults = entries.filter { it.name.contains(query.trim(), true) }
-        }
+        val trimmed = query.trim()
+        val searchResults = searchCache.takeIf { page > 1 && it.first == trimmed }?.second
+            ?: searchTitles(trimmed).also { searchCache = trimmed to it }
 
         val startIndex = (page - 1) * PAGE_SIZE
         val pageEntries = searchResults.drop(startIndex).take(PAGE_SIZE)
@@ -120,19 +112,34 @@ class YandexDisk : Source() {
         return AnimesPage(pageEntries.map { it.toSAnime() }, startIndex + pageEntries.size < searchResults.size)
     }
 
+    private suspend fun searchTitles(query: String): List<DiskEntry> {
+        val entries = publicLinkEntries().toMutableList()
+        if (hasPrivateAccess()) {
+            var listPage = 1
+            while (entries.size < SEARCH_SCAN_LIMIT) {
+                val (items, hasNextPage) = listEntries(rootPath(), null, listPage, CacheControl.FORCE_NETWORK)
+                entries += items.toTitles()
+                if (!hasNextPage) break
+                listPage++
+            }
+        }
+
+        return entries.filter { it.name.contains(query, true) }
+    }
+
     // =========================== Anime Details ============================
 
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
         val ref = anime.url.parseAs<EntryRef>()
-        val roots = if (ref.isDir) titleRoots(ref) else listOf(ref.path.parentPath())
-        val children = runCatching { roots.flatMap { listAll(it, ref.publicKey) } }.getOrDefault(emptyList())
-        val info = runCatching { readTitleInfo(ref, children) }.getOrNull()
+        val folder = if (ref.isDir) ref.path else ref.path.parentPath()
+        val children = catching { listAll(folder, ref.publicKey) }.getOrDefault(emptyList())
+        val info = catching { readTitleInfo(ref, children) }.getOrNull()
         val file = if (ref.isDir) null else DiskEntry(name = ref.path.substringAfterLast('/'), path = ref.path, isDir = false, publicKey = ref.publicKey)
 
         return anime.apply {
             info?.title?.let { title = it }
             thumbnail_url = if (file == null) {
-                coverUrl(roots.firstOrNull() ?: ref.path, ref.publicKey)
+                coverUrl(ref.path, ref.publicKey)
             } else {
                 children.firstOrNull { it.isImage() && it.name.withoutExtension().equals(file.name.withoutExtension(), true) }
                     ?.let { thumbnailUrl(it) }
@@ -168,8 +175,8 @@ class YandexDisk : Source() {
             }
 
             val nfo = if (ref.isDir) entries.findTitleNfo() else entries.firstOrNull { it.isNfo() }
-            val nfoInfo = nfo?.let { runCatching { parseTitleNfo(readText(it)) }.getOrNull() }
-            val text = entries.findInfoText()?.let { runCatching { parseInfoText(readText(it)) }.getOrNull() }
+            val nfoInfo = nfo?.let { catching { parseTitleNfo(readText(it)) }.getOrNull() }
+            val text = entries.findInfoText()?.let { catching { parseInfoText(readText(it)) }.getOrNull() }
             if (nfoInfo == null && text == null) continue
 
             return TitleInfo(
@@ -203,13 +210,12 @@ class YandexDisk : Source() {
             )
         }
 
-        val files = titleRoots(ref, CacheControl.FORCE_NETWORK).flatMap { folder ->
-            collectFiles(folder, ref.publicKey, preferences.includeSubfolders, CacheControl.FORCE_NETWORK)
-        }
+        val files = collectFiles(ref.path, ref.publicKey, preferences.includeSubfolders, CacheControl.FORCE_NETWORK)
         val groups = groupEpisodes(files, ref.path)
         val infos = readEpisodeInfos(groups, files)
         val singleSeason = groups.mapNotNull { it.key.season }.distinct().size <= 1
         val duplicateNames = groups.groupingBy { it.primary.displayName() }.eachCount().filterValues { it > 1 }.keys
+        val airedDateFormat = airedDateFormat()
 
         val episodes = groups.mapIndexed { index, group ->
             val primary = group.primary
@@ -224,7 +230,15 @@ class YandexDisk : Source() {
                     primary.displayName() in duplicateNames -> primary.path.relativeTo(ref.path).withoutExtension().replace("/", " / ")
                     else -> primary.displayName()
                 }
-                url = primary.toRef(root = ref.path, group = ref.group).toJsonString()
+                // Keyed by the episode, not by the file: the best quality, and with it the
+                // file played first, changes when another quality of the episode is added.
+                url = EntryRef(
+                    path = ref.path,
+                    isDir = false,
+                    publicKey = ref.publicKey,
+                    root = ref.path,
+                    key = group.key.key,
+                ).toJsonString()
                 episode_number = (if (singleSeason) episodeNumber?.toFloat() else null) ?: (index + 1).toFloat()
                 date_upload = info?.aired?.let { airedDateFormat.tryParse(it) }?.takeIf { it > 0 } ?: primary.modified
                 summary = info?.plot
@@ -232,7 +246,8 @@ class YandexDisk : Source() {
                     .ifEmpty { primary.size.takeIf { it > 0 }?.formatBytes() }
                 // The app loads episode previews without the source's client and never refreshes
                 // them, so this has to be a direct link; Coil's disk cache keeps it after it expires.
-                preview_url = group.variants.firstNotNullOfOrNull { it.preview }
+                // Previews of a private disk need the OAuth header, which that request lacks.
+                preview_url = if (ref.publicKey != null) group.variants.firstNotNullOfOrNull { it.preview } else null
             }
         }
 
@@ -256,7 +271,8 @@ class YandexDisk : Source() {
 
     override fun getEpisodeUrl(episode: SEpisode): String {
         val ref = episode.url.parseAs<EntryRef>()
-        return webUrl(EntryRef(ref.path.parentPath(), true, ref.publicKey))
+        val folder = if (ref.key != null) ref.path else ref.path.parentPath()
+        return webUrl(EntryRef(folder, true, ref.publicKey))
     }
 
     /** One episode per key; the same episode in other folders or qualities becomes another video. */
@@ -283,7 +299,7 @@ class YandexDisk : Source() {
         val semaphore = Semaphore(NFO_CONCURRENCY)
         return coroutineScope {
             wanted.map { (key, nfo) ->
-                async { semaphore.withPermit { runCatching { parseEpisodeNfo(readText(nfo)) }.getOrNull()?.let { key to it } } }
+                async { semaphore.withPermit { catching { parseEpisodeNfo(readText(nfo)) }.getOrNull()?.let { key to it } } }
             }.awaitAll().filterNotNull().toMap()
         }
     }
@@ -329,8 +345,10 @@ class YandexDisk : Source() {
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val ref = episode.url.parseAs<EntryRef>()
-        val variants = ref.root?.let { root -> runCatching { findVariants(ref, root) }.getOrNull() }
-            ?: listOf(DiskEntry(name = ref.path.substringAfterLast('/'), path = ref.path, isDir = false, publicKey = ref.publicKey))
+        val file = DiskEntry(name = ref.path.substringAfterLast('/'), path = ref.path, isDir = false, publicKey = ref.publicKey)
+        // Episodes saved before keys were added point to a file; their key is derived from it.
+        val variants = ref.root?.let { root -> findVariants(root, ref.publicKey, ref.key ?: file.episodeKey(root).key) }
+            ?: if (ref.key == null) listOf(file) else throw IOException("Episode not found. Refresh the episode list.")
 
         val loadTracks = preferences.externalTracks && !usesWebDav(ref.publicKey)
 
@@ -338,7 +356,7 @@ class YandexDisk : Source() {
             variants.map { variant ->
                 async {
                     val sidecars = if (loadTracks) {
-                        runCatching { findSidecars(variant.toRef(), recursive = ref.root != null) }.getOrDefault(emptyList())
+                        catching { findSidecars(variant.toRef(), recursive = ref.root != null) }.getOrDefault(emptyList())
                     } else {
                         emptyList()
                     }
@@ -358,7 +376,7 @@ class YandexDisk : Source() {
 
                     // Download links live for hours, so they're fetched right away: the app hides
                     // errors thrown from resolveVideo, while errors thrown here are shown.
-                    runCatching { resolveVideo(video) }
+                    catching { resolveVideo(video) }
                 }
             }.awaitAll()
         }
@@ -371,12 +389,8 @@ class YandexDisk : Source() {
         return resolved.toHosterList()
     }
 
-    private suspend fun findVariants(ref: EntryRef, root: String): List<DiskEntry>? {
-        val title = EntryRef(path = root, isDir = true, publicKey = ref.publicKey, group = ref.group)
-        val files = titleRoots(title).flatMap { collectFiles(it, ref.publicKey, preferences.includeSubfolders) }
-        val target = files.firstOrNull { it.path == ref.path } ?: return null
-        val key = target.episodeKey(root).key
-
+    private suspend fun findVariants(root: String, publicKey: String?, key: String): List<DiskEntry>? {
+        val files = collectFiles(root, publicKey, preferences.includeSubfolders)
         return groupEpisodes(files, root).firstOrNull { it.key.key == key }?.variants
     }
 
@@ -395,7 +409,7 @@ class YandexDisk : Source() {
             val videoUrl = async { downloadUrl(data.path, data.publicKey) }
             val tracks = data.sidecars.map { sidecar ->
                 async {
-                    runCatching { sidecar to Track(downloadUrl(sidecar.path, data.publicKey), sidecar.label) }.getOrNull()
+                    catching { sidecar to Track(downloadUrl(sidecar.path, data.publicKey), sidecar.label) }.getOrNull()
                 }
             }.awaitAll().filterNotNull()
 
@@ -443,15 +457,6 @@ class YandexDisk : Source() {
         if (entry.isDir) !entry.name.isIgnoredFolder() else entry.isListable() && !entry.isSample()
     }
 
-    /** Folders that make up a title: the folder itself, or every sibling of its release group. */
-    private suspend fun titleRoots(ref: EntryRef, cacheControl: CacheControl = DEFAULT_CACHE): List<String> {
-        val group = ref.group ?: return listOf(ref.path)
-
-        return listAll(ref.path, ref.publicKey, cacheControl)
-            .filter { it.isDir && it.name.releaseKey() == group }
-            .map { it.path }
-    }
-
     /**
      * A public link is one title when it's a file, holds videos itself or holds only seasons.
      * Otherwise it's a library and every entry in it is a title.
@@ -473,7 +478,7 @@ class YandexDisk : Source() {
     private fun DiskEntry.toSAnime(): SAnime = SAnime.create().apply {
         title = displayName()
         url = toRef().toJsonString()
-        thumbnail_url = if (isDir) coverUrl(coverPath ?: path, publicKey) else thumbnailUrl(this@toSAnime)
+        thumbnail_url = if (isDir) coverUrl(path, publicKey) else thumbnailUrl(this@toSAnime)
         description = if (isDir) null else size.takeIf { it > 0 }?.formatBytes()
         initialized = false
     }
@@ -529,7 +534,7 @@ class YandexDisk : Source() {
         val links = preferences.publicLinks.parsePublicLinks()
         val errors = mutableListOf<Throwable>()
         val entries = links.mapNotNull { link ->
-            runCatching { publicTitles(link) }.onFailure { errors += it }.getOrNull()
+            catching { publicTitles(link) }.onFailure { errors += it }.getOrNull()
         }.flatten()
 
         if (entries.isEmpty() && errors.isNotEmpty() && !hasPrivateAccess()) throw errors.first()

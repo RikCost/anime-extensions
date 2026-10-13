@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.all.yandexdisk
 
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import kotlin.coroutines.cancellation.CancellationException
 
 private val VIDEO_EXTENSIONS = setOf("3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpg", "mpeg", "mts", "ogv", "ts", "vob", "webm", "wmv")
 private val AUDIO_EXTENSIONS = setOf("aac", "ac3", "dts", "eac3", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav")
@@ -51,16 +52,31 @@ fun String.withoutExtension(): String {
     return if (extension.isEmpty()) this else substring(0, length - extension.length - 1)
 }
 
-/** Returns the normalized public link if [this] is a link to a public Yandex Disk resource. */
+/**
+ * Returns the normalized public link if [this] is a link to a public Yandex Disk resource.
+ * The scheme may be omitted; share parameters such as `?w=1` are dropped, except for the
+ * `/public?hash=…` form, where the query is the link itself.
+ */
 fun String.asPublicLink(): String? {
-    val url = trim().toHttpUrlOrNull() ?: return null
+    val text = trim().let { if (it.contains("://")) it else "https://$it" }
+    val url = text.toHttpUrlOrNull() ?: return null
     if (!PUBLIC_HOST_REGEX.containsMatchIn(url.host)) return null
     if (url.host != "yadi.sk" && PUBLIC_PATH_PREFIXES.none { url.encodedPath.startsWith(it) }) return null
 
-    return url.newBuilder().fragment(null).build().toString().removeSuffix("/")
+    val keepQuery = url.encodedPath.startsWith("/public")
+    return url.newBuilder().fragment(null).apply { if (!keepQuery) query(null) }.build().toString().removeSuffix("/")
 }
 
 fun String.parsePublicLinks(): List<String> = split(LINK_SEPARATOR_REGEX).mapNotNull { it.asPublicLink() }.distinct()
+
+/** [runCatching] that doesn't swallow coroutine cancellation. */
+inline fun <T> catching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (e: CancellationException) {
+    throw e
+} catch (e: Throwable) {
+    Result.failure(e)
+}
 
 private fun extensionOf(value: String): String {
     val extension = value.substringAfterLast('.', "")

@@ -77,21 +77,6 @@ fun String.isIgnoredFolder(): Boolean = lowercase() in IGNORED_FOLDERS
 
 fun DiskEntry.isSeasonFolder(): Boolean = isDir && SEASON_NAME_REGEX.matches(name.trim())
 
-/** Folder name without quality tags: equal keys mean the same release in another quality. */
-fun String.releaseKey(): String = replace(QUALITY_REGEX, " ")
-    .replace(UHD_REGEX, " ")
-    .replace(NON_WORD_REGEX, " ")
-    .trim()
-    .lowercase()
-
-/** "Once.Upon.a.Time.in.Iraq.S01.1080p.WEB-DL…" → "Once Upon a Time in Iraq S01"; normal names are kept. */
-fun String.prettyTitle(): String {
-    if (contains(' ') || count { it == '.' || it == '_' } < 2) return this
-
-    val beforeQuality = QUALITY_REGEX.find(this)?.range?.first?.takeIf { it > 0 }?.let { substring(0, it) } ?: this
-    return beforeQuality.replace('.', ' ').replace('_', ' ').trim().ifEmpty { this }
-}
-
 fun DiskEntry.isSample(): Boolean = !isDir && SAMPLE_REGEX.containsMatchIn(name.withoutExtension())
 
 fun DiskEntry.isNfo(): Boolean = !isDir && name.extension() == "nfo"
