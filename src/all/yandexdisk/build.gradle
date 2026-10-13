@@ -1,0 +1,9 @@
+ext {
+    extName = 'Yandex Disk'
+    extClass = '.YandexDisk'
+    libVersion = 16
+    extVersionCode = 1
+    isNsfw = false
+}
+
+apply plugin: "kei.plugins.extension.legacy"
