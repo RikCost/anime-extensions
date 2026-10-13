@@ -39,6 +39,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.minutes
 
 @Suppress("unused")
@@ -304,7 +305,19 @@ class YandexDisk : Source() {
         }
     }
 
+    // Folder listings of the last minutes. Details, the episode list, the hoster list and the
+    // sidecar search all walk the same folders, mostly right after one another.
+    private val listingCache = ConcurrentHashMap<String, Pair<Long, List<DiskEntry>>>()
+
+    /** All entries of a folder. [CacheControl.FORCE_NETWORK] skips the listing cache, but refills it. */
     private suspend fun listAll(path: String, publicKey: String?, cacheControl: CacheControl = DEFAULT_CACHE): List<DiskEntry> {
+        // The access method is part of the key: WebDAV and REST listings of the same path differ.
+        val cacheKey = "${publicKey ?: preferences.accessMethod}|$path"
+        val now = System.currentTimeMillis()
+        if (cacheControl != CacheControl.FORCE_NETWORK) {
+            listingCache[cacheKey]?.takeIf { now - it.first < LISTING_CACHE_MILLIS }?.let { return it.second }
+        }
+
         val entries = mutableListOf<DiskEntry>()
         var page = 1
         while (entries.size < MAX_FILES) {
@@ -313,6 +326,11 @@ class YandexDisk : Source() {
             if (!hasNextPage) break
             page++
         }
+
+        if (listingCache.size >= MAX_CACHED_LISTINGS) listingCache.entries.removeAll { now - it.value.first >= LISTING_CACHE_MILLIS }
+        if (listingCache.size >= MAX_CACHED_LISTINGS) listingCache.clear()
+        listingCache[cacheKey] = now to entries
+
         return entries
     }
 
@@ -324,16 +342,25 @@ class YandexDisk : Source() {
         maxFolders: Int = MAX_SCANNED_FOLDERS,
     ): List<DiskEntry> {
         val files = mutableListOf<DiskEntry>()
-        val folders = ArrayDeque(listOf(path))
+        var level = listOf(path)
         var scanned = 0
+        val semaphore = Semaphore(LIST_CONCURRENCY)
 
-        while (folders.isNotEmpty() && scanned < maxFolders && files.size < MAX_FILES) {
-            val folder = folders.removeFirst()
-            scanned++
-            listAll(folder, publicKey, cacheControl).forEach { entry ->
-                when {
-                    !entry.isDir -> files.add(entry)
-                    recursive && !entry.name.isIgnoredFolder() -> folders.addLast(entry.path)
+        // Breadth-first, one level at a time: the folders of a level are listed in parallel.
+        while (level.isNotEmpty() && scanned < maxFolders && files.size < MAX_FILES) {
+            val batch = level.take(maxFolders - scanned)
+            scanned += batch.size
+
+            val listings = coroutineScope {
+                batch.map { folder -> async { semaphore.withPermit { listAll(folder, publicKey, cacheControl) } } }.awaitAll()
+            }
+
+            level = buildList {
+                listings.flatten().forEach { entry ->
+                    when {
+                        !entry.isDir -> files.add(entry)
+                        recursive && !entry.name.isIgnoredFolder() -> add(entry.path)
+                    }
                 }
             }
         }
@@ -502,6 +529,7 @@ class YandexDisk : Source() {
             .addQueryParameter("offset", offset.toString())
             .addQueryParameter("sort", "name")
             .addQueryParameter("preview_size", PREVIEW_SIZE)
+            .addQueryParameter("fields", LISTING_FIELDS)
             .build()
 
         val embedded = apiGet(url, cacheControl).parseAs<ResourceDto>().embedded ?: return emptyList<DiskEntry>() to false
@@ -615,6 +643,7 @@ class YandexDisk : Source() {
         resourcesUrl(path, publicKey).newBuilder()
             .addQueryParameter("limit", COVER_SCAN_LIMIT.toString())
             .addQueryParameter("sort", "name")
+            .addQueryParameter("fields", LISTING_FIELDS)
             .build()
     }
 
@@ -836,6 +865,18 @@ class YandexDisk : Source() {
         private const val MAX_EPISODE_NFOS = 200
         private const val MAX_NFO_BYTES = 64 * 1024L
         private const val NFO_CONCURRENCY = 6
+        private const val LIST_CONCURRENCY = 4
+        private const val LISTING_CACHE_MILLIS = 5 * 60 * 1000L
+        private const val MAX_CACHED_LISTINGS = 500
+
+        // Only what DiskEntry needs: a full listing also carries hashes, EXIF, sizes of every
+        // preview and more, which makes big folders several times larger.
+        private val LISTING_FIELDS = listOf(
+            "name", "path", "type",
+            "_embedded.items.name", "_embedded.items.path", "_embedded.items.type",
+            "_embedded.items.size", "_embedded.items.modified", "_embedded.items.preview",
+            "_embedded.total",
+        ).joinToString(",")
 
         private const val PREVIEW_SIZE = "L"
         private const val PREVIEW_FRAGMENT = "yandexdisk-preview"
