@@ -4,12 +4,18 @@ import android.view.View
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 
-private const val HELP_TITLE = "How to organize videos"
+const val HELP_TITLE = "How to organize videos"
 
 private val HELP_TEXT = """
     WHERE TO LOOK
     • Your own disk: set an OAuth token or WebDAV login and app password, then set "Folder to browse" to your library folder, e.g. /Videos.
     • Public links: add disk.yandex.ru/d/… links to "Public links" or paste one into search. A link that holds videos or season folders is one title; otherwise every folder inside it is a separate title.
+
+    OAUTH TOKEN
+    1. On oauth.yandex.ru create an app for web services with the permission "Yandex.Disk REST API: Read all of Disk" (cloud_api:disk.read).
+    2. As its Redirect URI enter https://oauth.yandex.ru/verification_code
+    3. Open oauth.yandex.ru/authorize?response_type=token&client_id=YOUR_CLIENT_ID in a browser and allow access.
+    4. Copy the token from the page (or the whole page address) into "OAuth token". The Client secret isn't needed. The token lasts a year.
 
     TITLES
     • Every folder in the library is a separate title (series, anime).

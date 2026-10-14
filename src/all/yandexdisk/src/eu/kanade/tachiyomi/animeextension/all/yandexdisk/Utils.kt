@@ -14,6 +14,7 @@ private val COVER_NAMES = listOf("cover", "poster", "folder", "front", "thumb", 
 private val DIGITS_REGEX = Regex("""\d+""")
 private val PUBLIC_HOST_REGEX = Regex("""(^|\.)(yadi\.sk|disk\.yandex\.[a-z.]+|disk\.360\.yandex\.[a-z.]+)$""")
 private val LINK_SEPARATOR_REGEX = Regex("""[\s,;]+""")
+private val ACCESS_TOKEN_REGEX = Regex("""access_token=([^&#\s]+)""")
 private val PUBLIC_PATH_PREFIXES = listOf("/d/", "/i/", "/a/", "/public")
 
 private const val NUMBER_WIDTH = 12
@@ -66,6 +67,9 @@ fun String.asPublicLink(): String? {
     val keepQuery = url.encodedPath.startsWith("/public")
     return url.newBuilder().fragment(null).apply { if (!keepQuery) query(null) }.build().toString().removeSuffix("/")
 }
+
+/** The OAuth token itself, or the one in a pasted `…/verification_code#access_token=…` address. */
+fun String.toOAuthToken(): String = ACCESS_TOKEN_REGEX.find(this)?.groupValues?.get(1) ?: trim()
 
 fun String.parsePublicLinks(): List<String> = split(LINK_SEPARATOR_REGEX).mapNotNull { it.asPublicLink() }.distinct()
 

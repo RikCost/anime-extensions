@@ -805,7 +805,7 @@ class YandexDisk : Source() {
         else -> preferences.oauthToken.isNotBlank()
     }
 
-    private fun oauthHeader(): String? = preferences.oauthToken.trim().takeIf { it.isNotEmpty() }?.let { "OAuth $it" }
+    private fun oauthHeader(): String? = preferences.oauthToken.toOAuthToken().takeIf { it.isNotEmpty() }?.let { "OAuth $it" }
 
     private fun webdavCredentials(): String {
         val login = preferences.webdavLogin.trim()
@@ -851,7 +851,7 @@ class YandexDisk : Source() {
             key = OAUTH_TOKEN_KEY,
             default = OAUTH_TOKEN_DEFAULT,
             title = "OAuth token",
-            summary = "Token of an app with the cloud_api:disk.read permission (oauth.yandex.ru)",
+            summary = "Paste the token, or the whole page address after signing in. How to get one: see \"$HELP_TITLE\"",
             getSummary = ::masked,
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
         )
