@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.all.yandexdisk
 
 import android.content.SharedPreferences
+import android.net.Uri
 import android.text.InputType
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -35,7 +36,9 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -52,6 +55,12 @@ class YandexDisk : Source() {
     override val baseUrl = API_BASE
 
     override val supportsLatest = false
+
+    // A disk has nothing to recommend, and related-by-search would scan the whole library with
+    // every word of the title.
+    override val supportsRelatedAnimes = false
+
+    override val disableRelatedAnimesBySearch = true
 
     // SimpleDateFormat isn't thread-safe and folders are listed in parallel, so each listing gets its own.
     private fun apiDateFormat() = SimpleDateFormat(API_DATE_PATTERN, Locale.ROOT)
@@ -213,7 +222,11 @@ class YandexDisk : Source() {
 
         val files = collectFiles(ref.path, ref.publicKey, preferences.includeSubfolders, CacheControl.FORCE_NETWORK)
         val groups = groupEpisodes(files, ref.path)
-        val infos = readEpisodeInfos(groups, files)
+        val (infos, previews) = coroutineScope {
+            val infos = async { readEpisodeInfos(groups, files) }
+            val previews = async { episodePreviews(groups) }
+            infos.await() to previews.await()
+        }
         val singleSeason = groups.mapNotNull { it.key.season }.distinct().size <= 1
         val duplicateNames = groups.groupingBy { it.primary.displayName() }.eachCount().filterValues { it > 1 }.keys
         val airedDateFormat = airedDateFormat()
@@ -245,10 +258,7 @@ class YandexDisk : Source() {
                 summary = info?.plot
                 scanlator = group.variants.mapNotNull { it.quality() }.distinct().joinToString { "${it}p" }
                     .ifEmpty { primary.size.takeIf { it > 0 }?.formatBytes() }
-                // The app loads episode previews without the source's client and never refreshes
-                // them, so this has to be a direct link; Coil's disk cache keeps it after it expires.
-                // Previews of a private disk need the OAuth header, which that request lacks.
-                preview_url = if (ref.publicKey != null) group.variants.firstNotNullOfOrNull { it.preview } else null
+                preview_url = previews[group.key.key]
             }
         }
 
@@ -303,6 +313,64 @@ class YandexDisk : Source() {
                 async { semaphore.withPermit { catching { parseEpisodeNfo(readText(nfo)) }.getOrNull()?.let { key to it } } }
             }.awaitAll().filterNotNull().toMap()
         }
+    }
+
+    /**
+     * Episode previews as local files. The app loads them with its own client, without the OAuth
+     * header, and never replaces a stored preview URL, so the signed Yandex links would break as
+     * soon as they expire. The file name is stable, so a refresh restores a file the system
+     * removed from the cache.
+     */
+    private suspend fun episodePreviews(groups: List<EpisodeGroup>): Map<String, String> {
+        if (groups.size > MAX_EPISODE_PREVIEWS) return emptyMap()
+
+        val dir = File(context.cacheDir, PREVIEW_DIR).apply { mkdirs() }
+        trimPreviews(dir)
+        val semaphore = Semaphore(PREVIEW_CONCURRENCY)
+
+        return coroutineScope {
+            groups.mapNotNull { group ->
+                val entry = group.variants.firstOrNull { it.preview != null } ?: return@mapNotNull null
+                async {
+                    semaphore.withPermit {
+                        val file = File(dir, previewFileName(entry))
+                        val ready = file.exists() || catching { downloadPreview(entry.preview!!, entry.publicKey, file) }.isSuccess
+                        if (ready) group.key.key to Uri.fromFile(file).toString() else null
+                    }
+                }
+            }.awaitAll().filterNotNull().toMap()
+        }
+    }
+
+    private suspend fun downloadPreview(url: String, publicKey: String?, file: File) {
+        val previewHeaders = if (publicKey == null) {
+            headers.newBuilder().apply { oauthHeader()?.let { set("Authorization", it) } }.build()
+        } else {
+            headers
+        }
+
+        client.get(url = url, headers = previewHeaders, cacheControl = CacheControl.FORCE_NETWORK).use { response ->
+            if (response.body.contentType()?.type != "image") throw IOException("Not an image: $url")
+
+            // Written aside and renamed, so an interrupted download never leaves a broken file behind.
+            val partial = File(file.parentFile, "${file.name}.part")
+            partial.outputStream().use { response.body.byteStream().copyTo(it) }
+            if (!partial.renameTo(file)) {
+                partial.delete()
+                throw IOException("Can't save the preview")
+            }
+        }
+    }
+
+    /** Drops the oldest previews once there are too many; a refresh of their titles fetches them again. */
+    private fun trimPreviews(dir: File) {
+        val files = dir.listFiles()?.takeIf { it.size > MAX_STORED_PREVIEWS } ?: return
+        files.sortedBy { it.lastModified() }.take(files.size - MAX_STORED_PREVIEWS * 3 / 4).forEach { it.delete() }
+    }
+
+    private fun previewFileName(entry: DiskEntry): String {
+        val digest = MessageDigest.getInstance("MD5").digest("${entry.publicKey.orEmpty()}|${entry.path}".toByteArray())
+        return digest.joinToString("", postfix = ".jpg") { "%02x".format(it) }
     }
 
     // Folder listings of the last minutes. Details, the episode list, the hoster list and the
@@ -866,6 +934,10 @@ class YandexDisk : Source() {
         private const val MAX_NFO_BYTES = 64 * 1024L
         private const val NFO_CONCURRENCY = 6
         private const val LIST_CONCURRENCY = 4
+        private const val PREVIEW_CONCURRENCY = 4
+        private const val MAX_STORED_PREVIEWS = 2000
+        private const val MAX_EPISODE_PREVIEWS = 300
+        private const val PREVIEW_DIR = "yandexdisk_previews"
         private const val LISTING_CACHE_MILLIS = 5 * 60 * 1000L
         private const val MAX_CACHED_LISTINGS = 500
 
