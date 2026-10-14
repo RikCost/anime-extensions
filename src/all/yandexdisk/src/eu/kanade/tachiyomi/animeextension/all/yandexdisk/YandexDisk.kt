@@ -28,6 +28,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.CacheControl
 import okhttp3.Credentials
 import okhttp3.Headers
@@ -44,6 +45,7 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 @Suppress("unused")
 class YandexDisk : Source() {
@@ -101,9 +103,9 @@ class YandexDisk : Source() {
     }
 
     /** Entries of every library folder; one that can't be listed doesn't hide the others. */
-    private suspend fun listRoots(roots: List<String>): List<DiskEntry> {
+    private suspend fun listRoots(roots: List<String>, cacheControl: CacheControl = CacheControl.FORCE_NETWORK): List<DiskEntry> {
         val results = coroutineScope {
-            roots.map { root -> async { catching { listAll(root, null, CacheControl.FORCE_NETWORK) } } }.awaitAll()
+            roots.map { root -> async { catching { listAll(root, null, cacheControl) } } }.awaitAll()
         }
         if (results.all { it.isFailure }) throw results.first().exceptionOrNull()!!
 
@@ -138,19 +140,13 @@ class YandexDisk : Source() {
         return AnimesPage(pageEntries.map { it.toSAnime() }, startIndex + pageEntries.size < searchResults.size)
     }
 
+    /**
+     * Searches the same titles the catalogue shows, in every library folder. Listings of the last
+     * minutes are reused, so typing a refined query doesn't list the whole library again.
+     */
     private suspend fun searchTitles(query: String): List<DiskEntry> {
-        val entries = publicLinkEntries().toMutableList()
-        if (hasPrivateAccess()) {
-            for (root in rootPaths()) {
-                var listPage = 1
-                while (entries.size < SEARCH_SCAN_LIMIT) {
-                    val (items, hasNextPage) = listEntries(root, null, listPage, CacheControl.FORCE_NETWORK)
-                    entries += items.toTitles()
-                    if (!hasNextPage) break
-                    listPage++
-                }
-            }
-        }
+        val entries = publicLinkEntries() +
+            if (hasPrivateAccess()) listRoots(rootPaths(), DEFAULT_CACHE).toTitles() else emptyList()
 
         return entries.filter { it.name.contains(query, true) }
     }
@@ -338,26 +334,35 @@ class YandexDisk : Source() {
      * header, and never replaces a stored preview URL, so the signed Yandex links would break as
      * soon as they expire. The file name is stable, so a refresh restores a file the system
      * removed from the cache.
+     *
+     * Downloads get a time budget, so a big title doesn't hold its episode list back; previews
+     * that didn't make it are fetched on the next refresh.
      */
     private suspend fun episodePreviews(groups: List<EpisodeGroup>): Map<String, String> {
         if (groups.size > MAX_EPISODE_PREVIEWS) return emptyMap()
 
         val dir = File(context.cacheDir, PREVIEW_DIR).apply { mkdirs() }
         trimPreviews(dir)
-        val semaphore = Semaphore(PREVIEW_CONCURRENCY)
 
-        return coroutineScope {
-            groups.mapNotNull { group ->
-                val entry = group.variants.firstOrNull { it.preview != null } ?: return@mapNotNull null
-                async {
-                    semaphore.withPermit {
-                        val file = File(dir, previewFileName(entry))
-                        val ready = file.exists() || catching { downloadPreview(entry.preview!!, entry.publicKey, file) }.isSuccess
-                        if (ready) group.key.key to Uri.fromFile(file).toString() else null
-                    }
-                }
-            }.awaitAll().filterNotNull().toMap()
+        val previews = groups.mapNotNull { group ->
+            val entry = group.variants.firstOrNull { it.preview != null } ?: return@mapNotNull null
+            Triple(group.key.key, entry, File(dir, previewFileName(entry)))
         }
+        val missing = previews.filter { (_, _, file) -> !file.exists() }
+
+        if (missing.isNotEmpty()) {
+            val semaphore = Semaphore(PREVIEW_CONCURRENCY)
+            withTimeoutOrNull(PREVIEW_WAIT) {
+                coroutineScope {
+                    missing.map { (_, entry, file) ->
+                        async { semaphore.withPermit { catching { downloadPreview(entry.preview!!, entry.publicKey, file) } } }
+                    }.awaitAll()
+                }
+            }
+        }
+
+        return previews.filter { (_, _, file) -> file.exists() }
+            .associate { (key, _, file) -> key to Uri.fromFile(file).toString() }
     }
 
     private suspend fun downloadPreview(url: String, publicKey: String?, file: File) {
@@ -372,7 +377,12 @@ class YandexDisk : Source() {
 
             // Written aside and renamed, so an interrupted download never leaves a broken file behind.
             val partial = File(file.parentFile, "${file.name}.part")
-            partial.outputStream().use { response.body.byteStream().copyTo(it) }
+            try {
+                partial.outputStream().use { response.body.byteStream().copyTo(it) }
+            } catch (e: Throwable) {
+                partial.delete()
+                throw e
+            }
             if (!partial.renameTo(file)) {
                 partial.delete()
                 throw IOException("Can't save the preview")
@@ -397,8 +407,9 @@ class YandexDisk : Source() {
 
     /** All entries of a folder. [CacheControl.FORCE_NETWORK] skips the listing cache, but refills it. */
     private suspend fun listAll(path: String, publicKey: String?, cacheControl: CacheControl = DEFAULT_CACHE): List<DiskEntry> {
-        // The access method is part of the key: WebDAV and REST listings of the same path differ.
-        val cacheKey = "${publicKey ?: preferences.accessMethod}|$path"
+        // The access method and the account are part of the key: WebDAV and REST listings of the
+        // same path differ, and another token or login is another disk.
+        val cacheKey = "${publicKey ?: privateAccountKey()}|$path"
         val now = System.currentTimeMillis()
         if (cacheControl != CacheControl.FORCE_NETWORK) {
             listingCache[cacheKey]?.takeIf { now - it.first < LISTING_CACHE_MILLIS }?.let { return it.second }
@@ -593,7 +604,6 @@ class YandexDisk : Source() {
         url = toRef().toJsonString()
         thumbnail_url = if (isDir) coverUrl(path, publicKey) else thumbnailUrl(this@toSAnime)
         description = if (isDir) null else size.takeIf { it > 0 }?.formatBytes()
-        initialized = false
     }
 
     private fun usesWebDav(publicKey: String?) = publicKey == null && preferences.accessMethod == WEBDAV_VALUE
@@ -823,6 +833,11 @@ class YandexDisk : Source() {
         else -> preferences.oauthToken.isNotBlank()
     }
 
+    private fun privateAccountKey(): String = when (preferences.accessMethod) {
+        WEBDAV_VALUE -> "$WEBDAV_VALUE:${preferences.webdavLogin.trim().lowercase()}"
+        else -> "$OAUTH_VALUE:${preferences.oauthToken.toOAuthToken().hashCode()}"
+    }
+
     private fun oauthHeader(): String? = preferences.oauthToken.toOAuthToken().takeIf { it.isNotEmpty() }?.let { "OAuth $it" }
 
     private fun webdavCredentials(): String {
@@ -941,7 +956,6 @@ class YandexDisk : Source() {
         private const val PUBLIC_RESOURCES_PATH = "v1/disk/public/resources"
 
         private const val PAGE_SIZE = 100
-        private const val SEARCH_SCAN_LIMIT = 1000
         private const val MAX_FILES = 5000
         private const val MAX_SCANNED_FOLDERS = 200
         private const val MAX_SIDECAR_FOLDERS = 30
@@ -956,6 +970,7 @@ class YandexDisk : Source() {
         private const val MAX_STORED_PREVIEWS = 2000
         private const val MAX_EPISODE_PREVIEWS = 300
         private const val PREVIEW_DIR = "yandexdisk_previews"
+        private val PREVIEW_WAIT = 8.seconds
         private const val LISTING_CACHE_MILLIS = 5 * 60 * 1000L
         private const val MAX_CACHED_LISTINGS = 500
 

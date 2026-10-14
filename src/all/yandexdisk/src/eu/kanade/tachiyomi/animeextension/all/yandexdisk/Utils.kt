@@ -14,6 +14,7 @@ private val COVER_NAMES = listOf("cover", "poster", "folder", "front", "thumb", 
 private val DIGITS_REGEX = Regex("""\d+""")
 private val PUBLIC_HOST_REGEX = Regex("""(^|\.)(yadi\.sk|disk\.yandex\.[a-z.]+|disk\.360\.yandex\.[a-z.]+)$""")
 private val LINK_SEPARATOR_REGEX = Regex("""[\s,;]+""")
+
 // A comma only separates paths when the next one starts with "/": folder names may hold commas.
 private val PATH_SEPARATOR_REGEX = Regex("""[\n;]+|,\s*(?=/)""")
 private val ACCESS_TOKEN_REGEX = Regex("""access_token=([^&#\s]+)""")
@@ -22,42 +23,42 @@ private val PUBLIC_PATH_PREFIXES = listOf("/d/", "/i/", "/a/", "/public")
 private const val NUMBER_WIDTH = 12
 private const val MAX_EXTENSION_LENGTH = 4
 
-fun DiskEntry.isVideo(): Boolean = !isDir && extensionOf(name) in VIDEO_EXTENSIONS
+internal fun DiskEntry.isVideo(): Boolean = !isDir && extensionOf(name) in VIDEO_EXTENSIONS
 
-fun DiskEntry.isAudio(): Boolean = !isDir && extensionOf(name) in AUDIO_EXTENSIONS
+internal fun DiskEntry.isAudio(): Boolean = !isDir && extensionOf(name) in AUDIO_EXTENSIONS
 
-fun DiskEntry.isSubtitle(): Boolean = !isDir && extensionOf(name) in SUBTITLE_EXTENSIONS
+internal fun DiskEntry.isSubtitle(): Boolean = !isDir && extensionOf(name) in SUBTITLE_EXTENSIONS
 
-fun DiskEntry.isImage(): Boolean = !isDir && extensionOf(name) in IMAGE_EXTENSIONS
+internal fun DiskEntry.isImage(): Boolean = !isDir && extensionOf(name) in IMAGE_EXTENSIONS
 
-fun DiskEntry.displayName(): String = if (isDir) name else name.withoutExtension()
+internal fun DiskEntry.displayName(): String = if (isDir) name else name.withoutExtension()
 
-fun DiskEntry.coverRank(): Int = COVER_NAMES.indexOf(name.withoutExtension().lowercase()).let { if (it < 0) COVER_NAMES.size else it }
+internal fun DiskEntry.coverRank(): Int = COVER_NAMES.indexOf(name.withoutExtension().lowercase()).let { if (it < 0) COVER_NAMES.size else it }
 
-fun String.extension(): String = extensionOf(this)
+internal fun String.extension(): String = extensionOf(this)
 
 /** A folder path on the disk, always absolute and without trailing slash ("/" is the disk root). */
-fun String.asDiskPath(): String = trim()
+internal fun String.asDiskPath(): String = trim()
     .let { if (it.startsWith("/")) it else "/$it" }
     .removeSuffix("/")
     .ifEmpty { "/" }
 
 /** Several disk paths, one per line or separated by ";" (or by "," before the next "/"). */
-fun String.parseDiskPaths(): List<String> = split(PATH_SEPARATOR_REGEX)
+internal fun String.parseDiskPaths(): List<String> = split(PATH_SEPARATOR_REGEX)
     .filter { it.isNotBlank() }
     .map { it.asDiskPath() }
     .distinct()
     .ifEmpty { listOf("/") }
 
-fun String.parentPath(): String = substringBeforeLast('/', "").ifEmpty { "/" }
+internal fun String.parentPath(): String = substringBeforeLast('/', "").ifEmpty { "/" }
 
 /** Path relative to [root], without the leading slash. */
-fun String.relativeTo(root: String): String = if (root == "/") removePrefix("/") else removePrefix(root).removePrefix("/")
+internal fun String.relativeTo(root: String): String = if (root == "/") removePrefix("/") else removePrefix(root).removePrefix("/")
 
 /** Digits are padded so that "ep2" sorts before "ep10". */
-fun String.sortKey(): String = DIGITS_REGEX.replace(lowercase()) { it.value.padStart(NUMBER_WIDTH, '0') }
+internal fun String.sortKey(): String = DIGITS_REGEX.replace(lowercase()) { it.value.padStart(NUMBER_WIDTH, '0') }
 
-fun String.withoutExtension(): String {
+internal fun String.withoutExtension(): String {
     val extension = extensionOf(this)
     return if (extension.isEmpty()) this else substring(0, length - extension.length - 1)
 }
@@ -67,7 +68,7 @@ fun String.withoutExtension(): String {
  * The scheme may be omitted; share parameters such as `?w=1` are dropped, except for the
  * `/public?hash=…` form, where the query is the link itself.
  */
-fun String.asPublicLink(): String? {
+internal fun String.asPublicLink(): String? {
     val text = trim().let { if (it.contains("://")) it else "https://$it" }
     val url = text.toHttpUrlOrNull() ?: return null
     if (!PUBLIC_HOST_REGEX.containsMatchIn(url.host)) return null
@@ -78,12 +79,12 @@ fun String.asPublicLink(): String? {
 }
 
 /** The OAuth token itself, or the one in a pasted `…/verification_code#access_token=…` address. */
-fun String.toOAuthToken(): String = ACCESS_TOKEN_REGEX.find(this)?.groupValues?.get(1) ?: trim()
+internal fun String.toOAuthToken(): String = ACCESS_TOKEN_REGEX.find(this)?.groupValues?.get(1) ?: trim()
 
-fun String.parsePublicLinks(): List<String> = split(LINK_SEPARATOR_REGEX).mapNotNull { it.asPublicLink() }.distinct()
+internal fun String.parsePublicLinks(): List<String> = split(LINK_SEPARATOR_REGEX).mapNotNull { it.asPublicLink() }.distinct()
 
 /** [runCatching] that doesn't swallow coroutine cancellation. */
-inline fun <T> catching(block: () -> T): Result<T> = try {
+internal inline fun <T> catching(block: () -> T): Result<T> = try {
     Result.success(block())
 } catch (e: CancellationException) {
     throw e

@@ -63,7 +63,7 @@ private val HELP_TEXT = """
  * dialog before calling the listener), so the help is shown as that dialog's message instead,
  * with the input field hidden and nothing saved.
  */
-fun PreferenceScreen.addHelpPreference() {
+internal fun PreferenceScreen.addHelpPreference() {
     EditTextPreference(context).apply {
         key = "help_layout"
         title = HELP_TITLE

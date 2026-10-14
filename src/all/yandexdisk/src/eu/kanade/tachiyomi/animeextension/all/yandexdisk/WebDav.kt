@@ -54,8 +54,7 @@ internal fun propfindRequest(path: String): Request = Request.Builder()
     .method("PROPFIND", PROPFIND_BODY)
     .build()
 
-internal suspend fun OkHttpClient.propfind(path: String, dateFormat: SimpleDateFormat): List<DiskEntry> =
-    newCall(propfindRequest(path)).await().use { it.toPropfindEntries(path, dateFormat) }
+internal suspend fun OkHttpClient.propfind(path: String, dateFormat: SimpleDateFormat): List<DiskEntry> = newCall(propfindRequest(path)).await().use { it.toPropfindEntries(path, dateFormat) }
 
 internal fun Response.toPropfindEntries(path: String, dateFormat: SimpleDateFormat): List<DiskEntry> = when {
     isSuccessful -> parsePropfind(body.string(), path, dateFormat)

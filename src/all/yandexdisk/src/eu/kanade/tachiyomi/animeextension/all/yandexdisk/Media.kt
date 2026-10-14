@@ -39,7 +39,7 @@ class EpisodeGroup(val key: EpisodeKey, val variants: List<DiskEntry>) {
 }
 
 /** Videos with the same key are the same episode in different qualities. */
-fun DiskEntry.episodeKey(root: String): EpisodeKey {
+internal fun DiskEntry.episodeKey(root: String): EpisodeKey {
     val baseName = name.withoutExtension()
     val folders = path.parentPath().relativeTo(root)
 
@@ -69,27 +69,27 @@ fun DiskEntry.episodeKey(root: String): EpisodeKey {
 }
 
 /** Video height read from the file name, or from the name of the folder it's in. */
-fun DiskEntry.quality(): Int? = sequenceOf(name, path.parentPath().substringAfterLast('/')).firstNotNullOfOrNull { value ->
+internal fun DiskEntry.quality(): Int? = sequenceOf(name, path.parentPath().substringAfterLast('/')).firstNotNullOfOrNull { value ->
     QUALITY_REGEX.find(value)?.groupValues?.get(1)?.toInt() ?: if (UHD_REGEX.containsMatchIn(value)) 2160 else null
 }
 
-fun String.isIgnoredFolder(): Boolean = lowercase() in IGNORED_FOLDERS
+internal fun String.isIgnoredFolder(): Boolean = lowercase() in IGNORED_FOLDERS
 
-fun DiskEntry.isSeasonFolder(): Boolean = isDir && SEASON_NAME_REGEX.matches(name.trim())
+internal fun DiskEntry.isSeasonFolder(): Boolean = isDir && SEASON_NAME_REGEX.matches(name.trim())
 
-fun DiskEntry.isSample(): Boolean = !isDir && SAMPLE_REGEX.containsMatchIn(name.withoutExtension())
+internal fun DiskEntry.isSample(): Boolean = !isDir && SAMPLE_REGEX.containsMatchIn(name.withoutExtension())
 
-fun DiskEntry.isNfo(): Boolean = !isDir && name.extension() == "nfo"
+internal fun DiskEntry.isNfo(): Boolean = !isDir && name.extension() == "nfo"
 
 /** A text file describing the title, best match first; MediaInfo dumps are skipped. */
-fun List<DiskEntry>.findInfoText(): DiskEntry? = filter { !it.isDir && it.name.extension() == "txt" && it.size in 1..MAX_TEXT_BYTES }
+internal fun List<DiskEntry>.findInfoText(): DiskEntry? = filter { !it.isDir && it.name.extension() == "txt" && it.size in 1..MAX_TEXT_BYTES }
     .filterNot { it.name.lowercase().startsWith("mediainfo") }
     .minByOrNull { entry ->
         val lowerName = entry.name.lowercase()
         INFO_TEXT_HINTS.indexOfFirst { lowerName.contains(it) }.let { if (it < 0) INFO_TEXT_HINTS.size else it }
     }
 
-fun List<DiskEntry>.findTitleNfo(): DiskEntry? = firstOrNull { it.isNfo() && it.name.lowercase() in setOf("tvshow.nfo", "movie.nfo") }
+internal fun List<DiskEntry>.findTitleNfo(): DiskEntry? = firstOrNull { it.isNfo() && it.name.lowercase() in setOf("tvshow.nfo", "movie.nfo") }
     ?: singleOrNull { it.isNfo() && it.size in 1..MAX_TEXT_BYTES }
 
 class TitleInfo(
@@ -108,7 +108,7 @@ class EpisodeInfo(
 )
 
 /** Kodi `tvshow.nfo` / `movie.nfo`. */
-fun parseTitleNfo(text: String): TitleInfo? {
+internal fun parseTitleNfo(text: String): TitleInfo? {
     val document = Jsoup.parse(text, "", Parser.xmlParser())
     val root = document.selectFirst("tvshow, movie") ?: return null
 
@@ -125,7 +125,7 @@ fun parseTitleNfo(text: String): TitleInfo? {
 }
 
 /** Kodi `<episodedetails>`. */
-fun parseEpisodeNfo(text: String): EpisodeInfo? {
+internal fun parseEpisodeNfo(text: String): EpisodeInfo? {
     val root = Jsoup.parse(text, "", Parser.xmlParser()).selectFirst("episodedetails, movie") ?: return null
 
     return EpisodeInfo(
@@ -136,7 +136,7 @@ fun parseEpisodeNfo(text: String): EpisodeInfo? {
 }
 
 /** Free-form description; "Жанр: …" / "Режиссёр: …" style lines fill the matching fields. */
-fun parseInfoText(text: String): TitleInfo {
+internal fun parseInfoText(text: String): TitleInfo {
     val fields = FIELD_REGEX.findAll(text).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
 
     return TitleInfo(
@@ -148,7 +148,7 @@ fun parseInfoText(text: String): TitleInfo {
 }
 
 /** UTF-8 when valid, otherwise Windows-1251, which is what most Russian release notes use. */
-fun ByteArray.decodeText(): String {
+internal fun ByteArray.decodeText(): String {
     val bytes = if (size >= 3 && this[0] == 0xEF.toByte() && this[1] == 0xBB.toByte() && this[2] == 0xBF.toByte()) copyOfRange(3, size) else this
 
     return try {
