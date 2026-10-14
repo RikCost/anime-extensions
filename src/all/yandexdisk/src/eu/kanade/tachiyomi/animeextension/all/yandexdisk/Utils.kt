@@ -14,6 +14,8 @@ private val COVER_NAMES = listOf("cover", "poster", "folder", "front", "thumb", 
 private val DIGITS_REGEX = Regex("""\d+""")
 private val PUBLIC_HOST_REGEX = Regex("""(^|\.)(yadi\.sk|disk\.yandex\.[a-z.]+|disk\.360\.yandex\.[a-z.]+)$""")
 private val LINK_SEPARATOR_REGEX = Regex("""[\s,;]+""")
+// A comma only separates paths when the next one starts with "/": folder names may hold commas.
+private val PATH_SEPARATOR_REGEX = Regex("""[\n;]+|,\s*(?=/)""")
 private val ACCESS_TOKEN_REGEX = Regex("""access_token=([^&#\s]+)""")
 private val PUBLIC_PATH_PREFIXES = listOf("/d/", "/i/", "/a/", "/public")
 
@@ -39,6 +41,13 @@ fun String.asDiskPath(): String = trim()
     .let { if (it.startsWith("/")) it else "/$it" }
     .removeSuffix("/")
     .ifEmpty { "/" }
+
+/** Several disk paths, one per line or separated by ";" (or by "," before the next "/"). */
+fun String.parseDiskPaths(): List<String> = split(PATH_SEPARATOR_REGEX)
+    .filter { it.isNotBlank() }
+    .map { it.asDiskPath() }
+    .distinct()
+    .ifEmpty { listOf("/") }
 
 fun String.parentPath(): String = substringBeforeLast('/', "").ifEmpty { "/" }
 

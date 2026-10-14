@@ -8,7 +8,7 @@ const val HELP_TITLE = "How to organize videos"
 
 private val HELP_TEXT = """
     WHERE TO LOOK
-    • Your own disk: set an OAuth token or WebDAV login and app password, then set "Folder to browse" to your library folder, e.g. /Videos.
+    • Your own disk: set an OAuth token or WebDAV login and app password, then set "Folders to browse" to your library folder, e.g. /Videos. Several folders go one per line or are separated by ";".
     • Public links: add disk.yandex.ru/d/… links to "Public links" or paste one into search. A link that holds videos or season folders is one title; otherwise every folder inside it is a separate title.
 
     OAUTH TOKEN

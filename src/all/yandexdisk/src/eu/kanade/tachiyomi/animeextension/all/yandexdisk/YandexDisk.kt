@@ -88,10 +88,26 @@ class YandexDisk : Source() {
             return AnimesPage(publicEntries.map { it.toSAnime() }, false)
         }
 
-        val (entries, hasNextPage) = listEntries(rootPath(), null, page, CacheControl.FORCE_NETWORK)
+        val roots = rootPaths()
+        val (entries, hasNextPage) = if (roots.size == 1) {
+            listEntries(roots.single(), null, page, CacheControl.FORCE_NETWORK)
+        } else {
+            // Paging across several folders isn't worth it: they're all listed on the first page.
+            (if (page == 1) listRoots(roots) else emptyList()) to false
+        }
         val animes = (publicEntries + entries.toTitles()).map { it.toSAnime() }
 
         return AnimesPage(animes, hasNextPage)
+    }
+
+    /** Entries of every library folder; one that can't be listed doesn't hide the others. */
+    private suspend fun listRoots(roots: List<String>): List<DiskEntry> {
+        val results = coroutineScope {
+            roots.map { root -> async { catching { listAll(root, null, CacheControl.FORCE_NETWORK) } } }.awaitAll()
+        }
+        if (results.all { it.isFailure }) throw results.first().exceptionOrNull()!!
+
+        return results.flatMap { it.getOrDefault(emptyList()) }
     }
 
     // =============================== Search ===============================
@@ -125,12 +141,14 @@ class YandexDisk : Source() {
     private suspend fun searchTitles(query: String): List<DiskEntry> {
         val entries = publicLinkEntries().toMutableList()
         if (hasPrivateAccess()) {
-            var listPage = 1
-            while (entries.size < SEARCH_SCAN_LIMIT) {
-                val (items, hasNextPage) = listEntries(rootPath(), null, listPage, CacheControl.FORCE_NETWORK)
-                entries += items.toTitles()
-                if (!hasNextPage) break
-                listPage++
+            for (root in rootPaths()) {
+                var listPage = 1
+                while (entries.size < SEARCH_SCAN_LIMIT) {
+                    val (items, hasNextPage) = listEntries(root, null, listPage, CacheControl.FORCE_NETWORK)
+                    entries += items.toTitles()
+                    if (!hasNextPage) break
+                    listPage++
+                }
             }
         }
 
@@ -789,7 +807,7 @@ class YandexDisk : Source() {
 
     private fun apiUrl(path: String) = baseUrl.toHttpUrl().newBuilder().addPathSegments(path)
 
-    private fun rootPath(): String = preferences.rootPath.asDiskPath()
+    private fun rootPaths(): List<String> = preferences.rootPath.parseDiskPaths()
 
     private fun webUrl(ref: EntryRef): String {
         ref.publicKey?.let { return it }
@@ -876,10 +894,10 @@ class YandexDisk : Source() {
         screen.addEditTextPreference(
             key = ROOT_PATH_KEY,
             default = ROOT_PATH_DEFAULT,
-            title = "Folder to browse",
-            summary = "Disk path, e.g. /Anime",
-            getSummary = { it.asDiskPath() },
-            inputType = InputType.TYPE_CLASS_TEXT,
+            title = "Folders to browse",
+            summary = "Disk path, e.g. /Anime. Several: one per line or separated by \";\"",
+            getSummary = { it.parseDiskPaths().joinToString() },
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
         )
 
         screen.addEditTextPreference(
