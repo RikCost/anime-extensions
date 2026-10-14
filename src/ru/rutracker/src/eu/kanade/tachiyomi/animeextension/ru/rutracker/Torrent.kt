@@ -3,17 +3,15 @@ package eu.kanade.tachiyomi.animeextension.ru.rutracker
 import java.security.MessageDigest
 
 /**
- * Minimal bencode reader for .torrent files. Extracts the info-hash (SHA-1 of the raw `info`
- * dictionary), the display name, the trackers and the file list — enough to build a magnet
- * link with per-file `&index=` selectors without depending on the runtime torrent helper.
+ * Minimal bencode reader for .torrent files: the info-hash (SHA-1 of the raw `info` dictionary),
+ * the trackers and the file list, enough to build a magnet link with per-file `&index=` selectors.
  */
-object RuTrackerTorrent {
+object Torrent {
 
-    data class Entry(val index: Int, val path: String, val length: Long)
+    class Entry(val index: Int, val path: String, val length: Long)
 
-    data class Meta(
+    class Meta(
         val infoHashHex: String,
-        val name: String,
         val trackers: List<String>,
         val files: List<Entry>,
     )
@@ -26,7 +24,6 @@ object RuTrackerTorrent {
 
         var announce: String? = null
         val announceList = mutableListOf<String>()
-        var name = ""
         var infoHashHex = ""
         val entries = mutableListOf<Entry>()
 
@@ -44,7 +41,7 @@ object RuTrackerTorrent {
                     val start = reader.pos
                     val info = reader.readValue() as Map<*, *>
                     infoHashHex = sha1Hex(data.copyOfRange(start, reader.pos))
-                    name = (info["name"] as? ByteArray)?.toString(Charsets.UTF_8).orEmpty()
+                    val name = (info["name"] as? ByteArray)?.toString(Charsets.UTF_8).orEmpty()
 
                     val files = info["files"]
                     if (files is List<*>) {
@@ -68,7 +65,7 @@ object RuTrackerTorrent {
             .filter { it.isNotBlank() }
             .distinct()
 
-        return Meta(infoHashHex, name, trackers, entries)
+        return Meta(infoHashHex, trackers, entries)
     }
 
     private fun sha1Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1").digest(bytes)

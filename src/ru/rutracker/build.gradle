@@ -1,6 +1,7 @@
 ext {
     extName = 'RuTracker'
     extClass = '.RuTracker'
+    libVersion = 16
     extVersionCode = 1
     isTorrent = true
     isNsfw = true
