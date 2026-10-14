@@ -23,6 +23,10 @@ import keiyoushi.utils.formatBytes
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -335,8 +339,9 @@ class YandexDisk : Source() {
      * soon as they expire. The file name is stable, so a refresh restores a file the system
      * removed from the cache.
      *
-     * Downloads get a time budget, so a big title doesn't hold its episode list back; previews
-     * that didn't make it are fetched on the next refresh.
+     * The list waits for downloads only up to a time budget. Yandex renders a video frame on the
+     * first request, which can take longer than that, so the downloads aren't cancelled: they
+     * finish in the background and the next refresh picks the files up.
      */
     private suspend fun episodePreviews(groups: List<EpisodeGroup>): Map<String, String> {
         if (groups.size > MAX_EPISODE_PREVIEWS) return emptyMap()
@@ -348,22 +353,29 @@ class YandexDisk : Source() {
             val entry = group.variants.firstOrNull { it.preview != null } ?: return@mapNotNull null
             Triple(group.key.key, entry, File(dir, previewFileName(entry)))
         }
-        val missing = previews.filter { (_, _, file) -> !file.exists() }
 
-        if (missing.isNotEmpty()) {
-            val semaphore = Semaphore(PREVIEW_CONCURRENCY)
-            withTimeoutOrNull(PREVIEW_WAIT) {
-                coroutineScope {
-                    missing.map { (_, entry, file) ->
-                        async { semaphore.withPermit { catching { downloadPreview(entry.preview!!, entry.publicKey, file) } } }
-                    }.awaitAll()
+        val downloads = previews.filter { (_, _, file) -> !file.exists() }.map { (_, entry, file) ->
+            // One download per file, also when a refresh comes while the previous one still runs.
+            previewDownloads.computeIfAbsent(file.name) {
+                previewScope.async {
+                    try {
+                        previewSemaphore.withPermit { catching { downloadPreview(entry.preview!!, entry.publicKey, file) } }
+                    } finally {
+                        previewDownloads.remove(file.name)
+                    }
                 }
             }
         }
+        if (downloads.isNotEmpty()) withTimeoutOrNull(PREVIEW_WAIT) { downloads.awaitAll() }
 
         return previews.filter { (_, _, file) -> file.exists() }
             .associate { (key, _, file) -> key to Uri.fromFile(file).toString() }
     }
+
+    // Preview downloads outlive the episode list request that started them (see episodePreviews).
+    private val previewScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    private val previewDownloads = ConcurrentHashMap<String, Deferred<Result<Unit>>>()
+    private val previewSemaphore = Semaphore(PREVIEW_CONCURRENCY)
 
     private suspend fun downloadPreview(url: String, publicKey: String?, file: File) {
         val previewHeaders = if (publicKey == null) {
