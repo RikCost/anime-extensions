@@ -10,7 +10,7 @@ Yuzono Anikku/Aniyomi anime extensions – Kotlin + Jsoup/OkHttp scrapers. Each 
 
 ## Commands
 
-**Always scope a task to a module.** The build has ~400 modules (307 extensions + 79 libs + 12 themes);
+**Always scope a task to a module.** The build has ~330 modules (250 extensions + 73 libs + 9 themes);
 an unscoped `./gradlew <task>` configures every one of them.
 
 - Verify a change (fast – no APK link/package step): `./gradlew :src:<lang>:<source>:compileDebugKotlin`
@@ -24,17 +24,14 @@ Module paths are colon-separated and mirror the directory layout: `:src:en:mirur
 
 ### Tests
 
-`core/src/test/kotlin/keiyoushi/utils/` holds the repo's only unit tests (`NextJsTest`, `UrlUtilsTest`).
-Extensions have none – they are verified by compiling and running against the live site
-(`CONTRIBUTING.md#submitting-the-changes` ~ `1369`).
+The repo's only unit tests are in `core/src/test/kotlin/keiyoushi/utils/`, `lib/unpacker/test/kotlin/`
+and `lib/megaextractor/test/`. Extensions have none – they are verified by compiling and running
+against the live site (`CONTRIBUTING.md#submitting-the-changes` ~ `1369`).
 
 ```bash
+./gradlew --continue :core:testDebugUnitTest :lib:unpacker:testDebugUnitTest :lib:megaextractor:testDebugUnitTest
 ./gradlew :core:testDebugUnitTest --tests 'keiyoushi.utils.UrlUtilsTest'
 ```
-
-Known-broken: `:core:compileDebugUnitTestKotlin` fails – the tests import `kotlin.test.*` but
-`core/build.gradle.kts` only declares `testImplementation(libs.junit)`. Adding a `kotlin-test`
-dependency fixes it; until then the test task cannot run.
 
 ### Loading a subset of modules
 
@@ -50,7 +47,7 @@ loadIndividualExtension("en", "miruro")
 
 ## Structure
 
-- `src/<lang>/<source>/build.gradle` – extension metadata (`extName`, `extClass`, `extVersionCode` **or** `themePkg`+`overrideVersionCode`, `isNsfw`)
+- `src/<lang>/<source>/build.gradle` – extension metadata (`extName`, `extClass`, `extVersionCode` **or** `themePkg`+`overrideVersionCode`, `isNsfw`, optional `libVersion`)
 - `src/<lang>/<source>/src/eu/kanade/tachiyomi/animeextension/<lang>/<source>/` – source code (package must match)
 - `lib-multisrc/<theme>/build.gradle.kts` – theme base (`baseVersionCode`, `alias(kei.plugins.multisrc)`)
 - `lib-multisrc/<theme>/src/.../multisrc/<theme>/` – abstract theme class `extends AnimeHttpSource`
@@ -67,6 +64,7 @@ See `CONTRIBUTING.md` for full rules. Critical for agents:
 - Use `response.parseAs<T>()`, `response.asJsoup()`, `SimpleDateFormat(...).tryParse()`, `element.absUrl("href")` + `setUrlWithoutDomain()`.
 - No hardcoded `User-Agent`, no `Thread.sleep()`, no manual Cloudflare checks, no `buildJsonObject` for requests.
 - Preserve `id` when renaming `name`/`lang`; keep package name stable.
+- New or migrated extensions target extensions-lib 16: extend `AnimeHttpSource` directly (not the `keiyoushi.utils.AnimeHttpLegacySource`/`ParsedAnimeHttpLegacySource` shims), implement hosters (`getHosterList`/`getVideoList(hoster)`), use the named `Video(videoUrl =, videoTitle =, ...)` constructor, and set `libVersion = 16` in `build.gradle`. See `CONTRIBUTING.md#extensions-lib-16`.
 
 ### `keiyoushi.network` client helpers
 
@@ -85,6 +83,9 @@ See `CONTRIBUTING.md` for full rules. Critical for agents:
   `by lazy` keeps serving the stale client. See `lib-multisrc/anikototheme/.../AnikotoTheme.kt`.
 - Do not eagerly initialize `client` in a theme base class: the initializer runs before subclass
   constructors, so an overridden `open val rateLimit` reads `0`.
+- Do not create `android.*` objects (e.g. `LruCache`) in a source's constructor or property
+  initializers – use `by lazy`. The repo publisher instantiates sources on a plain JVM where they
+  throw `Stub!`, which blocks the publish for every extension. See `CONTRIBUTING.md#misc-notes`.
 
 ## Versioning – bump once per PR, theme bump propagates
 
@@ -114,7 +115,7 @@ From `.github/workflows/build_pull_request.yml` + `.github/scripts/`:
 
 ## Boundaries
 
-- Do not change `versionName` manually (generated `14.<versionCode>`).
+- Do not change `versionName` manually (generated `<libVersion>.<versionCode>`, lib version defaults to `14`).
 - Do not commit `web_hi_res_512.png` (delete after Icon Generator).
 - Do not push to `upstream` (`no_pushing` – fork workflow `CONTRIBUTING.md:170-196`). Use `origin` (your fork) for PRs.
 - Never commit secrets, keystore, or `local.properties`.

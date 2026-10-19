@@ -18,6 +18,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.await
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.get
@@ -31,6 +32,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -404,7 +406,8 @@ class Senshi :
                         fmt(resolve(epSkip?.introStart, embed.introStartMs)) + "|||" +
                         fmt(resolve(epSkip?.introEnd, embed.introEndMs)) + "|||" +
                         fmt(resolve(epSkip?.outroStart, embed.outroStartMs)) + "|||" +
-                        fmt(resolve(epSkip?.outroEnd, embed.outroEndMs)),
+                        fmt(resolve(epSkip?.outroEnd, embed.outroEndMs)) +
+                        "|||$meta.malId|||$epNum",
                 )
             }
     }
@@ -418,18 +421,12 @@ class Senshi :
         if (!hoster.internalData.startsWith("vidcloud::")) return emptyList()
 
         val parts = hoster.internalData.removePrefix("vidcloud::").split("|||")
-        val sourceId = parts.getOrNull(0)?.takeIf(String::isNotBlank) ?: return emptyList()
+        val videoId = parts.getOrNull(0)?.takeIf(String::isNotBlank)?.toLongOrNull()
+            ?: return emptyList()
 
-        val entries = try {
-            client.get("https://s.vidcloud.se/_v1/sources?id=$sourceId", videoHeaders)
-                .use { it.parseAs<List<VidcloudEntryDto>>() }
-        } catch (_: Exception) {
-            return emptyList()
-        }
-
+        val entries = vidcloudResolver.resolve(videoId)
         val audioTag = parts.getOrNull(1).orEmpty()
-        // Rendition patterns as observed in decrypted masters: audio/0_ja, audio/1_en
-        val audioRendition = if (audioTag == "Dub") "1_en" else "0_ja"
+        val isDub = audioTag.equals("Dub", ignoreCase = true)
 
         val proxy = getProxyServer()
 
@@ -447,12 +444,20 @@ class Senshi :
         }
 
         return entries.flatMap { entry ->
-            val src = entry.source?.src?.takeUnless(String::isBlank) ?: return@flatMap emptyList()
+            // A "both" source carries both audio renditions and is split by language
+            // in the proxy; separate "sub"/"dub" sources are picked by label, and a
+            // source labeled for the other audio type is never used.
+            val wanted = if (isDub) "dub" else "sub"
+            val unwanted = if (isDub) "sub" else "dub"
+            val source = entry.sources.firstOrNull { it.label.equals(wanted, ignoreCase = true) }
+                ?: entry.sources.firstOrNull { !it.label.equals(unwanted, ignoreCase = true) }
+                ?: return@flatMap emptyList()
+            val audioLanguage = if (isDub) "en" else "ja"
 
-            val isDub = audioTag.equals("Dub", ignoreCase = true)
-
-            val subtitles = entry.tracks
-                .filter { !it.url.isNullOrBlank() && !it.label.equals("chapter", ignoreCase = true) }
+            val usableTracks = entry.tracks.filter {
+                !(it.url ?: it.vttUrl).isNullOrBlank() && !it.label.equals("chapter", ignoreCase = true)
+            }
+            val subtitles = usableTracks
                 // Subs live on the SHARED source (Dub & HardSub point at one Vidcloud
                 // stream), so each hoster keeps only its own set.
                 .filter { track ->
@@ -460,13 +465,11 @@ class Senshi :
                         track.url.orEmpty().contains("ai_dub")
                     if (isDub) isDubTrack else !isDubTrack
                 }
-                .ifEmpty {
-                    entry.tracks.filter { !it.url.isNullOrBlank() && !it.label.equals("chapter", ignoreCase = true) }
-                }
-                .map { Track(proxy.proxyUrl(it.url!!), it.label ?: "Unknown") }
+                .ifEmpty { usableTracks }
+                .map { Track(proxy.proxyUrl(it.url ?: it.vttUrl!!), it.label ?: "Unknown") }
 
             playlistUtils.extractFromHls(
-                playlistUrl = proxy.proxyUrl(src) + "&audio=$audioRendition",
+                playlistUrl = proxy.proxyUrl(source.src) + "&audio=$audioLanguage",
                 referer = "$baseUrl/",
                 masterHeaders = videoHeaders,
                 videoHeaders = videoHeaders,
@@ -486,18 +489,22 @@ class Senshi :
     }
 
     // ========================= Proxy / Key Wiring =========================
-    private val keyStore by lazy {
-        Em3u8KeyStore(preferences, network.client, headers) { baseUrl }
+    private val vidcloudResolver by lazy {
+        VidcloudResolver({ baseUrl }, headers["User-Agent"]) {
+            // Lets the app's Cloudflare interceptor clear a challenge on the
+            // vidcloud host; the clearance cookie is shared with the WebView.
+            client.newCall(GET(VIDCLOUD_URL, videoHeaders, CacheControl.FORCE_NETWORK)).await().close()
+        }
     }
 
     @Volatile
-    private var proxyServer: Em3u8Proxy? = null
+    private var proxyServer: EM3u8Proxy? = null
 
     @Synchronized
-    private fun getProxyServer(): Em3u8Proxy {
+    private fun getProxyServer(): EM3u8Proxy {
         if (proxyServer == null || !proxyServer!!.isAlive) {
             proxyServer?.stop()
-            proxyServer = Em3u8Proxy(videoHeaders, network.client, keyStore)
+            proxyServer = EM3u8Proxy(videoHeaders, network.client)
                 .also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
         }
         return proxyServer!!
@@ -581,6 +588,7 @@ class Senshi :
         private val HTML_TAG_REGEX = Regex("""</?(i|b|em)>""", RegexOption.IGNORE_CASE)
 
         private const val IMAGE_CDN_HOST = "img.anicdn.se"
+        private const val VIDCLOUD_URL = "https://s.vidcloud.se/"
 
         fun parseStatus(status: String?): Int = when (status?.trim()) {
             "Currently Airing" -> SAnime.ONGOING

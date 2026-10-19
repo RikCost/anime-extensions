@@ -31,6 +31,11 @@ import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonBody
 import keiyoushi.utils.tryParse
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
@@ -89,9 +94,6 @@ class ReAnime :
     private val excludedAudioTypes: Set<String>
         get() = preferences.getStringSet(PREF_AUDIO_EXCLUDE_KEY, PREF_AUDIO_EXCLUDE_DEFAULT)
             ?: PREF_AUDIO_EXCLUDE_DEFAULT
-
-    private val hideFiller: Boolean
-        get() = preferences.getBoolean(PREF_HIDE_FILLER_KEY, PREF_HIDE_FILLER_DEFAULT)
 
     private val includeDirectDownloads: Boolean
         get() = preferences.getBoolean(PREF_DOWNLOAD_KEY, PREF_DOWNLOAD_DEFAULT)
@@ -243,7 +245,6 @@ class ReAnime :
     }
 
     // =========================== Anime Details ============================
-
     private val detailsUrl = "$baseUrl/anime"
     override fun getAnimeUrl(anime: SAnime): String = "$detailsUrl/${anime.url}"
 
@@ -433,11 +434,6 @@ class ReAnime :
             append("**Trailer**: [YouTube](https://www.youtube.com/watch?v=${it.id})")
             append("\n")
         }
-
-        dto.bannerImage?.takeIf { it.isNotBlank() }?.let {
-            append("\n")
-            append("![Banner]($it)")
-        }
     }
 
     private fun getFancyScore(score: Int): String {
@@ -446,7 +442,7 @@ class ReAnime :
         return "${"★".repeat(stars)}${"☆".repeat(5 - stars)} $score"
     }
 
-    // ============================== Related Anime ==============================
+    // ========================== Related Anime =============================
     override val disableRelatedAnimesBySearch = true
 
     override suspend fun fetchRelatedAnimeList(anime: SAnime): List<SAnime> {
@@ -510,7 +506,6 @@ class ReAnime :
     }
 
     // ============================== Episodes ==============================
-
     override fun seasonListParse(response: Response) = throw UnsupportedOperationException()
 
     override fun episodeListRequest(anime: SAnime): Request {
@@ -536,8 +531,16 @@ class ReAnime :
             throw Exception("Could not find any episodes. Check if there are any in WebView.")
         }
 
-        val visibleEpisodes = dto.data.filterNot { it.isFiller && hideFiller }
+        val visibleEpisodes = dto.data
         if (visibleEpisodes.isEmpty()) throw Exception("Could not find any episodes. Check if there are any in WebView.")
+
+        val thumbnails = coroutineScope {
+            meta?.anilistId?.takeIf { it > 0 }?.let { anilistId ->
+                async {
+                    fetchThumbnails(anilistId.toString(), "$baseUrl/watch/${anime.url}")
+                }
+            }?.await()
+        }
 
         val maxSub = meta?.subbed ?: 0
         val maxDub = meta?.dubbed ?: 0
@@ -563,7 +566,6 @@ class ReAnime :
                 name = buildString {
                     append(baseName)
                     if (ep.isRecap) append(" [Recap]")
-                    if (ep.isFiller && !hideFiller) append(" [Filler]")
                 }
 
                 val hasSub = epNum <= maxSub
@@ -576,9 +578,21 @@ class ReAnime :
                     else -> null
                 }
 
+                fillermark = ep.isFiller
+
                 date_upload = dateFormat.tryParse(ep.aired)
+
+                preview_url = thumbnails?.get(epNumStr)
             }
         }.reversed()
+    }
+
+    private suspend fun fetchThumbnails(animeId: String, episodeUrl: String): Map<String, String>? = try {
+        client.get("$baseUrl/api/thumbnails/$animeId", apiHeaders(episodeUrl)).use { res ->
+            res.parseAs<ThumbnailsResponseDto>().thumbnails
+        }
+    } catch (_: Exception) {
+        null
     }
 
     override fun getEpisodeUrl(episode: SEpisode): String {
@@ -592,7 +606,7 @@ class ReAnime :
 
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
-    // ============================== Video Links ==============================
+    // ============================ Video Links =============================
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val bits = episode.url.split("/")
         val slug = bits.getOrNull(0) ?: ""
@@ -829,10 +843,22 @@ class ReAnime :
             }
 
             val subtitleTracks = embedDataDto.subtitles
-                ?.map { Track(it.url, it.language ?: "Unknown") }
-                ?: emptyList()
+                ?.mapNotNull { sub ->
+                    if (!sub.url.startsWith("https://")) return@mapNotNull null
+                    Track(sub.url, sub.language ?: "Unknown")
+                } ?: emptyList()
 
             val skipTimes = embedDataDto.toSkipTimes()
+
+            // HLS serves the same .ass files without the MKV's embedded fonts,
+            // which breaks positioned karaoke. Seed mpv's fonts dir in the background
+            // before playback starts.
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    FlixFontCache.ensureFonts(client, flixHeaders, html, rawJson, subtitleTracks.map { it.url })
+                } catch (_: Exception) {
+                }
+            }
 
             // Strip subtitles/chapters from the payload (enc-dec.app doesn't need them)
             val embedData = try {
@@ -895,9 +921,6 @@ class ReAnime :
             // Cache skip times for this episode (keyed by the local proxy URL)
             skipTimesCache.put(localManifestUrl, skipTimes)
 
-            // Subtitles need to be routed through proxy server so that servers like HD-2 load its subtitles
-            val proxiedSubtitles = subtitleTracks.map { Track(server.createSubtitleProxyUrl(it.url), it.lang) }
-
             // Step 6: Pass to PlaylistUtils
             // Build TimeStamps for Aniyomi's skip button
             val skipTimeStamps = buildList {
@@ -916,10 +939,10 @@ class ReAnime :
             val videos = playlistUtils.extractFromHls(
                 playlistUrl = localManifestUrl,
                 referer = flixCloudUrl,
-                masterHeaders = headers,
-                videoHeaders = headers,
+                masterHeaders = flixHeaders,
+                videoHeaders = flixHeaders,
                 videoNameGen = { quality -> quality },
-                subtitleList = proxiedSubtitles,
+                subtitleList = subtitleTracks,
             ).map { video ->
                 if (skipTimeStamps.isNotEmpty()) video.copy(timestamps = skipTimeStamps) else video
             }
@@ -1111,15 +1134,6 @@ class ReAnime :
 
         screen.addPreference(
             SwitchPreferenceCompat(screen.context).apply {
-                key = PREF_HIDE_FILLER_KEY
-                title = "Hide Filler Episodes"
-                summary = "Hides episodes marked as filler from the episode list."
-                setDefaultValue(PREF_HIDE_FILLER_DEFAULT)
-            },
-        )
-
-        screen.addPreference(
-            SwitchPreferenceCompat(screen.context).apply {
                 key = PREF_DOWNLOAD_KEY
                 title = "Include Direct Downloads"
                 summary = "Adds the original MKV file of each server as an extra video entry."
@@ -1158,9 +1172,6 @@ class ReAnime :
         private const val PREF_TITLE_LANG_DEFAULT = "romaji"
         private val PREF_TITLE_LANG_ENTRIES = listOf("Romaji", "English", "Japanese (Native)")
         private val PREF_TITLE_LANG_VALUES = listOf("romaji", "english", "native")
-
-        private const val PREF_HIDE_FILLER_KEY = "hide_filler"
-        private const val PREF_HIDE_FILLER_DEFAULT = false
 
         private const val PREF_DOWNLOAD_KEY = "include_direct_downloads"
         private const val PREF_DOWNLOAD_DEFAULT = true
