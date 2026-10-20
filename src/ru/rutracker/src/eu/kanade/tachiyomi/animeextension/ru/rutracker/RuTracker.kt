@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.ru.rutracker
 
+import android.graphics.BitmapFactory
 import android.text.InputType
 import android.webkit.WebSettings
 import androidx.preference.PreferenceScreen
@@ -376,12 +377,21 @@ class RuTracker :
 
     // ============================== Details ===============================
 
-    override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.asJsoup()
+    // Picking the cover may request the candidate images, which a parse method must not do.
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        val document = client.get(baseUrl + anime.url, headers).use { it.asJsoup() }
+        return parseDetails(document).apply {
+            thumbnail_url = coverCache[anime.url]
+                ?: extractThumbnail(document, document.selectFirst("div.post_body"))
+        }
+    }
+
+    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
+
+    private fun parseDetails(document: Document): SAnime {
         val post = document.selectFirst("div.post_body")
         return SAnime.create().apply {
             title = document.selectFirst("h1.maintitle")!!.text()
-            thumbnail_url = extractThumbnail(document, post)
             description = extractDescription(post)
             genre = document.select("td.nav.t-breadcrumb-top a, .nav.w100 a").eachText()
                 .filter { it.isNotEmpty() && !it.equals("RuTracker.org", ignoreCase = true) }
@@ -391,18 +401,36 @@ class RuTracker :
         }
     }
 
+    // Many posts put an age badge (16+, 18+) before the poster, with the same markup, so the
+    // candidates are told apart by their pixel size.
+    private suspend fun extractThumbnail(document: Document, post: Element?): String? {
+        val candidates = thumbnailCandidates(document, post)
+        if (candidates.size <= 1) return candidates.firstOrNull()
+        return candidates.take(MAX_COVER_PROBES).firstOrNull { isPosterSized(it) } ?: candidates.first()
+    }
+
     // Post images are lazy-loaded: the real URL is in the `title` of a <var class="postImg">.
-    private fun extractThumbnail(document: Document, post: Element?): String? {
+    private fun thumbnailCandidates(document: Document, post: Element?): List<String> {
         val candidates = mutableListOf<String>()
-        post?.selectFirst("var.postImg.img-right, var.postImg")?.let { candidates += it.attr("title") }
+        post?.select("var.postImg.img-right")?.forEach { candidates += it.attr("title") }
         post?.select("var.postImg")?.forEach { candidates += it.attr("title") }
         post?.select("img.postImg")?.forEach {
             candidates += it.attr("title")
             candidates += it.absUrl("src")
         }
         document.selectFirst("meta[property=og:image]")?.attr("content")?.let { candidates += it }
-        return candidates.firstNotNullOfOrNull { it.normalizeImageUrl() }
+        return candidates.mapNotNull { it.normalizeImageUrl() }.distinct()
     }
+
+    // Only the image header is decoded. An image whose size can't be read is kept, so a host that
+    // fails the probe doesn't lose the cover.
+    private suspend fun isPosterSized(url: String): Boolean = catching {
+        client.get(url, headers).use { response ->
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeStream(response.body.byteStream(), null, options)
+            options.outWidth <= 0 || minOf(options.outWidth, options.outHeight) >= MIN_COVER_SIDE
+        }
+    }.getOrDefault(true)
 
     private fun String?.normalizeImageUrl(): String? {
         val url = this?.trim().orEmpty()
@@ -656,6 +684,10 @@ class RuTracker :
         private const val DESC_LIMIT = 2000
         private const val COVER_CONCURRENCY = 8
         private const val MAX_CACHED_COVERS = 1000
+        private const val MAX_COVER_PROBES = 3
+
+        // Age badges are about 60 px; real posters are several hundred.
+        private const val MIN_COVER_SIDE = 150
 
         private val WHITESPACE_REGEX = Regex("""\s+""")
 
