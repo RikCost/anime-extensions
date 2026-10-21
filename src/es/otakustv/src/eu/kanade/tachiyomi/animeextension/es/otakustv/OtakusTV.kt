@@ -10,21 +10,29 @@ import aniyomi.lib.uqloadextractor.UqloadExtractor
 import aniyomi.lib.voeextractor.VoeExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
-import keiyoushi.utils.parallelCatchingFlatMap
+import keiyoushi.network.get
+import keiyoushi.network.post
+import keiyoushi.utils.decodeHexToString
+import keiyoushi.utils.parallelFlatMap
 import keiyoushi.utils.useAsJsoup
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class OtakusTV : ParsedAnimeHttpLegacySource() {
+class OtakusTV : AnimeHttpSource() {
 
     override val name = "OtakusTV"
 
@@ -34,10 +42,12 @@ class OtakusTV : ParsedAnimeHttpLegacySource() {
 
     override val supportsLatest = true
 
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    // ─── Extractors ─────────────────────────────────────────────────────────────
+    private val backendUrl = "$baseUrl/backend"
+
+    private val baseHost = baseUrl.toHttpUrl().host
 
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
     private val doodExtractor by lazy { DoodExtractor(client) }
@@ -47,144 +57,177 @@ class OtakusTV : ParsedAnimeHttpLegacySource() {
     private val mixDropExtractor by lazy { MixDropExtractor(client) }
     private val luluExtractor by lazy { LuluExtractor(client, headers) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
-    private val serverExtractor by lazy { OtakusTvServerExtractor() }
-
-    // ─── Popular ─────────────────────────────────────────────────────────────────
 
     override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/animes?pag=$page", headers)
 
-    override fun popularAnimeSelector(): String = "article.li"
+    override fun popularAnimeParse(response: Response): AnimesPage {
+        val document = response.useAsJsoup()
+        val animes = document.select("article.li").map(::animeFromElement)
+        val hasNextPage = document.selectFirst("ul.pag a:contains(Siguiente)") != null
+        return AnimesPage(animes, hasNextPage)
+    }
 
-    override fun popularAnimeFromElement(element: Element): SAnime = animeFromElement(element)
-
-    override fun popularAnimeNextPageSelector(): String = "ul.pag a:contains(Siguiente)"
-
-    // ─── Latest ────────────────────────────────────────────────────────────────
-
-    // "Latest" surfaces titles with freshly released episodes — the homepage "Nuevos episodios"
-    // grid. Each card links to an episode (/ver/{slug}-{num}); we map it back to its anime.
+    // "Latest" is the homepage "Nuevos episodios" grid. Each card links to an episode
+    // (/ver/{slug}-{num}), which is mapped back to its anime.
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/", headers)
 
-    override fun latestUpdatesSelector(): String = "article.li:has(a[href*=/ver/])"
-
-    // The same anime can have several freshly released episodes, each rendered as its own card.
-    // Collapse them so every title appears once instead of once-per-episode.
+    // A title with several new episodes has a card for each of them.
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val animes = response.useAsJsoup()
-            .select(latestUpdatesSelector())
-            .map { latestUpdatesFromElement(it) }
+            .select("article.li:has(a[href*=/ver/])")
+            .map(::latestAnimeFromElement)
             .distinctBy { it.url }
         return AnimesPage(animes, false)
     }
 
-    override fun latestUpdatesFromElement(element: Element): SAnime = SAnime.create().apply {
+    private fun latestAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
         val link = element.selectFirst("a[href*=/ver/]")!!
-        val slug = link.attr("abs:href").substringAfterLast("/ver/").trimEnd('/')
+        val slug = link.absUrl("href").substringAfterLast("/ver/").trimEnd('/')
             .replace(EPISODE_SUFFIX_REGEX, "")
-        setUrlWithoutDomain("/anime/$slug")
+        url = "/anime/$slug"
         title = element.selectFirst("img")?.attr("alt").orEmpty()
             .replace(EPISODE_LABEL_REGEX, "")
-            .trim()
-            .ifBlank { link.attr("title").cleanTitle() }
+            .ifEmpty { link.attr("title").cleanTitle() }
         thumbnail_url = "$baseUrl/cdn/img/anime/$slug.webp"
     }
-
-    override fun latestUpdatesNextPageSelector(): String? = null
-
-    // ─── Search ────────────────────────────────────────────────────────────────
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val url = "$baseUrl/animes".toHttpUrl().newBuilder()
             .addQueryParameter("buscar", query)
             .addQueryParameter("pag", page.toString())
             .build()
-        return GET(url.toString(), headers)
+        return GET(url, headers)
     }
 
-    override fun searchAnimeSelector(): String = popularAnimeSelector()
-
-    override fun searchAnimeFromElement(element: Element): SAnime = animeFromElement(element)
-
-    override fun searchAnimeNextPageSelector(): String = popularAnimeNextPageSelector()
+    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     private fun animeFromElement(element: Element): SAnime = SAnime.create().apply {
         val link = element.selectFirst("a[href*=/anime/]") ?: element.selectFirst("a")!!
-        setUrlWithoutDomain(link.attr("href"))
+        // Listing links are relative ("./anime/…"), so they are resolved before the domain is dropped.
+        setUrlWithoutDomain(link.absUrl("href"))
         val img = element.selectFirst("img")
         title = img?.attr("alt").orEmpty()
-            .ifBlank { link.attr("title").cleanTitle() }
-            .ifBlank { link.text().cleanTitle() }
-            .trim()
+            .ifEmpty { link.attr("title").cleanTitle() }
+            .ifEmpty { link.text().cleanTitle() }
         thumbnail_url = img?.let { it.absUrl("data-src").ifEmpty { it.absUrl("src") } }
     }
 
-    // ─── Details ──────────────────────────────────────────────────────────────────
-
-    override fun animeDetailsParse(document: Document): SAnime = SAnime.create().apply {
-        title = (document.selectFirst("h1")?.ownText() ?: document.selectFirst("h1")?.text().orEmpty())
-            .cleanTitle().trim()
-        thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("abs:content")
-            ?: document.selectFirst(".ti img, figure img")?.let { it.absUrl("data-src").ifEmpty { it.absUrl("src") } }
-        // The plot synopsis lives in a ".tx" block. Its ".tx.sp" sibling is SEO boilerplate
-        // about the site, and og:description is an SEO-prefixed, truncated copy — so prefer the
-        // clean ".tx" text and only fall back to a trimmed og:description.
-        description = document.selectFirst(".tx:not(.sp)")?.text()?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst("meta[property=og:description]")?.attr("content")
-                ?.substringAfter("OtakusTV.net")?.trim()
-                ?.takeIf { it.isNotBlank() }
-        genre = document.select("a[href*=genero=]").joinToString { it.text() }.ifBlank { null }
-        status = when (document.selectFirst("span.st")?.text()?.trim()?.lowercase()) {
-            "en emisión", "en emision" -> SAnime.ONGOING
-            "finalizado", "concluido", "completado" -> SAnime.COMPLETED
-            else -> SAnime.UNKNOWN
+    override fun animeDetailsParse(response: Response): SAnime {
+        val document = response.useAsJsoup()
+        return SAnime.create().apply {
+            // The heading is <h1><strong>Title <i>Sub Español</i></strong></h1>, so the plain
+            // title is the own text of <strong>.
+            val h1 = document.selectFirst("h1")
+            title = h1?.selectFirst("strong")?.ownText().orEmpty()
+                .ifEmpty { h1?.text().orEmpty().cleanTitle() }
+            thumbnail_url = document.selectFirst("meta[property=og:image]")?.absUrl("content")
+                ?: document.selectFirst(".ti img, figure img")?.let { it.absUrl("data-src").ifEmpty { it.absUrl("src") } }
+            // ".tx.sp" is SEO text about the site, and og:description is an SEO-prefixed,
+            // truncated copy of the synopsis.
+            description = document.selectFirst(".tx:not(.sp)")?.text()?.ifEmpty { null }
+                ?: document.selectFirst("meta[property=og:description]")?.attr("content")
+                    ?.substringAfter("OtakusTV.net")?.trim()
+                    ?.ifEmpty { null }
+            genre = document.select("a[href*=genero=]").joinToString { it.text() }.ifEmpty { null }
+            status = when (document.selectFirst("span.st")?.text()?.lowercase()) {
+                "en emisión", "en emision" -> SAnime.ONGOING
+                "finalizado", "concluido", "completado" -> SAnime.COMPLETED
+                else -> SAnime.UNKNOWN
+            }
         }
     }
 
-    // ─── Episodes ─────────────────────────────────────────────────────────────────
+    // The anime page shows the newest EPISODES_PER_PAGE episodes; older ones come from the
+    // backend in pages of the same size, numbered from the newest.
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val document = client.get(baseUrl + anime.url, headers).useAsJsoup()
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.useAsJsoup()
-        val slug = response.request.url.encodedPath.trimEnd('/').substringAfterLast('/')
+        // "#dt" names the watch-URL base ("…/ver/{slug}"), which is what the episode links use.
+        val info = document.selectFirst("#dt")
+        val watchUrl = info?.attr("data-u").orEmpty()
+        val slug = watchUrl.substringAfterLast("/ver/", "").trimEnd('/')
+            .ifEmpty { anime.url.trimEnd('/').substringAfterLast('/') }
+        val total = info?.attr("data-e")?.toIntOrNull() ?: 0
+        val pageCount = (total + EPISODES_PER_PAGE - 1) / EPISODES_PER_PAGE
+        if (info == null || pageCount <= 1) return parseEpisodes(document, slug).sortedByDescending { it.episode_number }
+
+        val animeId = info.attr("data-i")
+        val ajaxHeaders = ajaxHeaders(baseUrl + anime.url)
+        val gate = Semaphore(EPISODE_PAGE_CONCURRENCY)
+        val olderEpisodes = (2..pageCount).toList().parallelFlatMap { page ->
+            gate.withPermit {
+                val body = FormBody.Builder()
+                    .add("acc", "episodes")
+                    .add("i", animeId)
+                    .add("u", watchUrl)
+                    .add("p", page.toString())
+                    .build()
+                val fragment = client.post(backendUrl, ajaxHeaders, body).useAsJsoup()
+                parseEpisodes(fragment, slug)
+            }
+        }
+
+        return (parseEpisodes(document, slug) + olderEpisodes)
+            .distinctBy { it.url }
+            .sortedByDescending { it.episode_number }
+    }
+
+    // The anime page also lists the site's latest episodes, so only links named exactly
+    // "{slug}-{number}" are kept. The numeric tail stops the "naruto" page from picking up
+    // "naruto-shippuden-5".
+    private fun parseEpisodes(document: Document, slug: String): List<SEpisode> {
         val prefix = "$slug-"
-
-        // The page also lists global "latest episodes", so we keep only links whose slug is
-        // exactly "{thisSlug}-{number}". Requiring a numeric tail prevents a prefix collision
-        // (e.g. the "naruto" page must not pick up "naruto-shippuden-5").
         return document.select("a[href*=/ver/]")
-            .map { it.attr("abs:href") }
+            .mapNotNull { it.absUrl("href").toHttpUrlOrNull() }
+            .filter { it.host == baseHost }
             .distinct()
-            .mapNotNull { href ->
-                val verSlug = href.substringAfterLast("/ver/").trimEnd('/')
-                if (!verSlug.startsWith(prefix)) return@mapNotNull null
-                val num = verSlug.removePrefix(prefix)
+            .mapNotNull { url ->
+                val watchSlug = url.encodedPath.substringAfter("/ver/", "").trimEnd('/')
+                if (!watchSlug.startsWith(prefix)) return@mapNotNull null
+                val num = watchSlug.removePrefix(prefix)
                 val number = num.replace(',', '.').toFloatOrNull() ?: return@mapNotNull null
                 SEpisode.create().apply {
-                    url = href
+                    this.url = url.encodedPath
                     name = "Episodio $num"
                     episode_number = number
                 }
             }
-            .sortedByDescending { it.episode_number }
     }
 
-    // ─── Videos ───────────────────────────────────────────────────────────────────
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
-    // Episodes are hosted on a different domain (otakustv2.com), so their url is stored absolute.
-    override fun getEpisodeUrl(episode: SEpisode): String = episode.absoluteUrl
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // The server list is built by the page's own (obfuscated) JavaScript, so it is harvested
-        // through a WebView; each entry is a ready-to-extract hoster embed URL.
-        val embedUrls = serverExtractor.getEmbedUrls(episode.absoluteUrl, headers)
+    // The watch page carries the episode id as hex in ".opt[data-encrypt]"; the backend answers
+    // with one "li[encrypt]" per server, whose attribute is the hex-encoded embed URL.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = baseUrl + episode.url
+        val document = client.get(episodeUrl, headers).useAsJsoup()
+        val episodeId = document.selectFirst(".opt[data-encrypt]")?.attr("data-encrypt")
+            ?: return emptyList()
 
-        return embedUrls.parallelCatchingFlatMap(::serverVideoResolver)
+        val body = FormBody.Builder()
+            .add("acc", "opt")
+            .add("i", episodeId)
+            .build()
+        val servers = client.post(backendUrl, ajaxHeaders(episodeUrl), body).useAsJsoup()
+
+        // The same embed is often listed under several names ("filemoon 1", "byse").
+        return servers.select("li[encrypt]")
+            .mapNotNull { server ->
+                val url = runCatching { server.attr("encrypt").decodeHexToString() }.getOrNull()
+                    ?.takeIf { it.startsWith("http") }
+                    ?: return@mapNotNull null
+                val name = server.selectFirst("span")?.text().orEmpty().ifEmpty { server.attr("title") }
+                Hoster(hosterUrl = url, hosterName = name)
+            }
+            .distinctBy { it.hosterUrl }
     }
 
-    private val SEpisode.absoluteUrl: String
-        get() = if (url.startsWith("http")) url else baseUrl + url
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    private suspend fun serverVideoResolver(url: String): List<Video> {
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val url = hoster.hosterUrl
         val u = url.lowercase()
         return when {
             listOf("voe", "tubeless", "simpulum", "urochs", "nathanfrom", "metagnath", "donaldline", "yip.").any { it in u } ->
@@ -202,26 +245,27 @@ class OtakusTV : ParsedAnimeHttpLegacySource() {
         }
     }
 
-    override fun videoListSelector() = throw UnsupportedOperationException()
-    override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
-    override fun episodeListSelector() = throw UnsupportedOperationException()
-    override fun episodeFromElement(element: Element) = throw UnsupportedOperationException()
-
-    // ─── Helpers ──────────────────────────────────────────────────────────────────
+    private fun ajaxHeaders(referer: String): Headers = headers.newBuilder()
+        .set("Referer", referer)
+        .add("X-Requested-With", "XMLHttpRequest")
+        .build()
 
     private fun String.cleanTitle(): String = replace(TITLE_CLEAN_REGEX, "").trim()
 
     companion object {
-        // Strips the trailing "-{episode}" from a watch slug to recover the anime slug.
+        private const val EPISODES_PER_PAGE = 16
+        private const val EPISODE_PAGE_CONCURRENCY = 4
+
+        // The trailing "-{episode}" of a watch slug.
         private val EPISODE_SUFFIX_REGEX = Regex("""-\d+(?:[.,]\d+)?$""")
 
-        // Strips the trailing "episodio/capítulo/ep N…" tail from a latest-episode card label.
+        // The trailing "episodio/capítulo/ep N…" of a latest-episode card label.
         private val EPISODE_LABEL_REGEX =
             Regex("""\s+(episodios?|cap[ií]tulos?|cap|ep)\s+\d+.*$""", RegexOption.IGNORE_CASE)
 
-        // Strips leading "Ver " / trailing audio-language tags from titles.
+        // A leading "Ver " and trailing "Online"/audio-language tags.
         private val TITLE_CLEAN_REGEX = Regex(
-            """^Ver\s+|\s+Online$|\s+(Sub\s+Español|Audio\s+Latino|Latino|Castellano)$""",
+            """^Ver\s+(Anime\s+)?|\s+Online(\s+Gratis)?$|\s+(Sub\s+Español|Audio\s+Latino|Latino|Castellano)$""",
             RegexOption.IGNORE_CASE,
         )
     }
