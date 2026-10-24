@@ -87,7 +87,7 @@ class Aniliberty :
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         // The search endpoint returns a bare array; the catalog (filters branch) returns {data,meta}.
-        val body = response.use { it.body.string() }
+        val body = response.body.string() }
         return if (body.trimStart().startsWith("[")) {
             AnimesPage(body.parseAs<List<Release>>().map { it.toSAnime() }, false)
         } else {
