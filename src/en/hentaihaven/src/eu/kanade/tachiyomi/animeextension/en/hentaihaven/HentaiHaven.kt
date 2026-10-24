@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.animeextension.en.hentaihaven
 import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.en.hentaihaven.extractors.OctopusExtractor
-import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -32,9 +31,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-class HentaiHaven :
-    Source(),
-    ConfigurableAnimeSource {
+class HentaiHaven : Source() {
 
     override val name = "HentaiHaven"
     override val baseUrl = "https://hentaihaven.xxx"
