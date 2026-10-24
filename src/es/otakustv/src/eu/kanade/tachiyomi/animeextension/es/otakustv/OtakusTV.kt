@@ -228,7 +228,8 @@ class OtakusTV : AnimeHttpSource() {
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         val url = hoster.hosterUrl
-        val u = url.lowercase()
+        // Matched on the host only: a random embed ID can contain a token such as "voe".
+        val u = url.toHttpUrlOrNull()?.host?.lowercase() ?: url.lowercase()
         return when {
             listOf("voe", "tubeless", "simpulum", "urochs", "nathanfrom", "metagnath", "donaldline", "yip.").any { it in u } ->
                 voeExtractor.videosFromUrl(url, "VOE")
