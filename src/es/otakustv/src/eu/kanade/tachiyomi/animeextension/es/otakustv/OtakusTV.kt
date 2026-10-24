@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.FormBody
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
@@ -147,14 +148,14 @@ class OtakusTV : AnimeHttpSource() {
         val watchUrl = info?.attr("data-u").orEmpty()
         val slug = watchUrl.substringAfterLast("/ver/", "").trimEnd('/')
             .ifEmpty { anime.url.trimEnd('/').substringAfterLast('/') }
-        val total = info?.attr("data-e")?.toIntOrNull() ?: 0
+        val total = info?.attr("data-e")?.toIntOrNull()?.coerceIn(0, MAX_EPISODES) ?: 0
         val pageCount = (total + EPISODES_PER_PAGE - 1) / EPISODES_PER_PAGE
         if (info == null || pageCount <= 1) return parseEpisodes(document, slug).sortedByDescending { it.episode_number }
 
         val animeId = info.attr("data-i")
         val ajaxHeaders = ajaxHeaders(baseUrl + anime.url)
         val gate = Semaphore(EPISODE_PAGE_CONCURRENCY)
-        val olderEpisodes = (2..pageCount).toList().parallelFlatMap { page ->
+        suspend fun fetchPages(pages: List<Int>): List<SEpisode> = pages.parallelFlatMap { page ->
             gate.withPermit {
                 val body = FormBody.Builder()
                     .add("acc", "episodes")
@@ -167,9 +168,16 @@ class OtakusTV : AnimeHttpSource() {
             }
         }
 
-        return (parseEpisodes(document, slug) + olderEpisodes)
+        // A failed page fails the whole list on purpose: the app deletes episodes (and their
+        // watch progress) that a returned list leaves out.
+        var episodes = (parseEpisodes(document, slug) + fetchPages((2..pageCount).toList()))
             .distinctBy { it.url }
-            .sortedByDescending { it.episode_number }
+        // Pages are counted from the newest episode, so one published while they load shifts
+        // the oldest episodes onto the next page.
+        if (episodes.size < total) {
+            episodes = (episodes + fetchPages(listOf(pageCount + 1))).distinctBy { it.url }
+        }
+        return episodes.sortedByDescending { it.episode_number }
     }
 
     // The anime page also lists the site's latest episodes, so only links named exactly
@@ -216,7 +224,9 @@ class OtakusTV : AnimeHttpSource() {
         return servers.select("li[encrypt]")
             .mapNotNull { server ->
                 val url = runCatching { server.attr("encrypt").decodeHexToString() }.getOrNull()
-                    ?.takeIf { it.startsWith("http") }
+                    ?.toHttpUrlOrNull()
+                    ?.takeIf { it.isPublicEmbed() }
+                    ?.toString()
                     ?: return@mapNotNull null
                 val name = server.selectFirst("span")?.text().orEmpty().ifEmpty { server.attr("title") }
                 Hoster(hosterUrl = url, hosterName = name)
@@ -233,13 +243,14 @@ class OtakusTV : AnimeHttpSource() {
         return when {
             listOf("voe", "tubeless", "simpulum", "urochs", "nathanfrom", "metagnath", "donaldline", "yip.").any { it in u } ->
                 voeExtractor.videosFromUrl(url, "VOE")
+            // These extractors name the host in the video title themselves.
             listOf("dood", "doood", "ds2play", "ds2video", "d000d", "d0000d").any { it in u } ->
-                doodExtractor.videosFromUrl(url, "DoodStream")
+                doodExtractor.videosFromUrl(url)
             listOf("luluvdo", "lulustream", "lulu").any { it in u } ->
-                luluExtractor.videosFromUrl(url, "Lulu")
-            "uqload" in u -> uqloadExtractor.videosFromUrl(url, "Uqload")
+                luluExtractor.videosFromUrl(url, "")
+            "uqload" in u -> uqloadExtractor.videosFromUrl(url)
             "mp4upload" in u -> mp4uploadExtractor.videosFromUrl(url, headers)
-            "mixdrop" in u -> mixDropExtractor.videosFromUrl(url, prefix = "MixDrop")
+            "mixdrop" in u -> mixDropExtractor.videosFromUrl(url)
             listOf("bysesukior", "byse", "streamwish", "strwish", "wish", "filelions", "lion", "swdyu", "iplayerhls").any { it in u } ->
                 streamwishExtractor.videosFromUrl(url, "StreamWish")
             else -> universalExtractor.videosFromUrl(url, headers)
@@ -253,9 +264,21 @@ class OtakusTV : AnimeHttpSource() {
 
     private fun String.cleanTitle(): String = replace(TITLE_CLEAN_REGEX, "").trim()
 
+    // Embeds are opened by the extractors, some in a WebView, so only public HTTPS hosts are
+    // accepted: no IP literals and no local names.
+    private fun HttpUrl.isPublicEmbed(): Boolean = isHttps &&
+        '.' in host &&
+        !host.endsWith(".local") &&
+        !host.endsWith(".localhost") &&
+        ':' !in host &&
+        !host.all { it.isDigit() || it == '.' }
+
     companion object {
         private const val EPISODES_PER_PAGE = 16
         private const val EPISODE_PAGE_CONCURRENCY = 4
+
+        // Far above any real series; bounds the pages requested for a corrupt "data-e".
+        private const val MAX_EPISODES = 10_000
 
         // The trailing "-{episode}" of a watch slug.
         private val EPISODE_SUFFIX_REGEX = Regex("""-\d+(?:[.,]\d+)?$""")
