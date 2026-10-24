@@ -6,7 +6,7 @@ yuzono {
     name = "OtakusTV"
     className = "OtakusTV"
     versionCode = 1
-    contentWarning = ContentWarning.MIXED
+    contentWarning = ContentWarning.NSFW
     libVersion = "16"
 }
 
