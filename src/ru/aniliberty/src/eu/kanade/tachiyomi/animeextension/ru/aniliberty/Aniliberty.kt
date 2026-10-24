@@ -11,7 +11,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.network.get
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
@@ -42,8 +42,6 @@ class Aniliberty :
         .add("Referer", "$baseUrl/")
         .add("Accept", "application/json")
 
-    // ─── Popular / Latest ─────────────────────────────────────────────────────
-
     override fun popularAnimeRequest(page: Int): Request = catalogRequest(page, "RATING_DESC")
 
     override fun popularAnimeParse(response: Response): AnimesPage = catalogParse(response)
@@ -68,8 +66,6 @@ class Aniliberty :
         val hasNext = pagination != null && pagination.currentPage < pagination.totalPages
         return AnimesPage(animes, hasNext)
     }
-
-    // ─── Search ───────────────────────────────────────────────────────────────
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         if (query.isNotBlank()) {
@@ -102,8 +98,6 @@ class Aniliberty :
         }
     }
 
-    // ─── Details ──────────────────────────────────────────────────────────────
-
     override fun animeDetailsRequest(anime: SAnime): Request = GET("$apiUrl/anime/releases/${anime.url.releaseId()}", headers)
 
     override fun getAnimeUrl(anime: SAnime): String {
@@ -113,8 +107,6 @@ class Aniliberty :
     }
 
     override fun animeDetailsParse(response: Response): SAnime = response.parseAs<Release>().toSAnime()
-
-    // ─── Episodes ─────────────────────────────────────────────────────────────
 
     override fun episodeListRequest(anime: SAnime): Request = GET("$apiUrl/anime/releases/${anime.url.releaseId()}", headers)
 
@@ -136,15 +128,10 @@ class Aniliberty :
         }.sortedByDescending { it.episode_number }
     }
 
-    // ─── Seasons / hosters parsed from a response are not used: both are resolved
-    // from suspend methods against the API v1 endpoints instead (see getHosterList).
     override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
-    // ─── Videos ───────────────────────────────────────────────────────────────
-
-    // The API v1 release payload already carries the per-episode HLS streams, so the
-    // hosters are resolved directly from the episode url (release|episode ids) without
-    // an extra request here; videoListParse fetches the release matching the hoster.
+    // The episode url already names the release and the episode, so the single hoster is
+    // built without a request; getVideoList reads its streams from the release payload.
     override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
@@ -162,20 +149,16 @@ class Aniliberty :
         val releaseId = hoster.internalData.substringBefore('|')
         val episodeId = hoster.internalData.substringAfter('|')
 
-        val release = client.newCall(GET("$apiUrl/anime/releases/$releaseId", headers))
-            .awaitSuccess().parseAs<Release>()
+        val release = client.get("$apiUrl/anime/releases/$releaseId", headers).parseAs<Release>()
 
         val ep = release.episodes.firstOrNull { it.id == episodeId }
             ?: return emptyList()
 
-        val videoHeaders = headers.newBuilder()
-            .add("Referer", "$baseUrl/")
-            .build()
-
+        // `headers` already carries the site Referer the streams need.
         return listOfNotNull(
-            ep.hls1080?.let { Video(it, "1080p", it, headers = videoHeaders) },
-            ep.hls720?.let { Video(it, "720p", it, headers = videoHeaders) },
-            ep.hls480?.let { Video(it, "480p", it, headers = videoHeaders) },
+            ep.hls1080?.let { Video(videoUrl = it, videoTitle = "1080p", headers = headers) },
+            ep.hls720?.let { Video(videoUrl = it, videoTitle = "720p", headers = headers) },
+            ep.hls480?.let { Video(videoUrl = it, videoTitle = "480p", headers = headers) },
         ).applyQualityPreference()
     }
 
@@ -185,8 +168,6 @@ class Aniliberty :
         val pref = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
         return sortedByDescending { it.videoTitle.startsWith(pref) }
     }
-
-    // ─── Mappers ──────────────────────────────────────────────────────────────
 
     private fun Release.toSAnime(): SAnime = SAnime.create().apply {
         url = "$id|${alias.orEmpty()}"
@@ -208,8 +189,6 @@ class Aniliberty :
 
     private fun Float.formatOrdinal(): String = if (this % 1f == 0f) toInt().toString() else toString()
 
-    // ─── Filters ──────────────────────────────────────────────────────────────
-
     override fun getFilterList() = AnimeFilterList(
         AnimeFilter.Header("Фильтр игнорируется при текстовом поиске"),
         GenreFilter(),
@@ -218,8 +197,6 @@ class Aniliberty :
     private class GenreFilter : AnimeFilter.Select<String>("Жанр", GENRES.map { it.first }.toTypedArray()) {
         fun toUriPart() = GENRES[state].second
     }
-
-    // ─── Settings ─────────────────────────────────────────────────────────────
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         screen.addListPreference(
@@ -251,8 +228,6 @@ class Aniliberty :
         )
     }
 }
-
-// ─── API DTOs ──────────────────────────────────────────────────────────────────
 
 @Serializable
 private class CatalogResponse(
