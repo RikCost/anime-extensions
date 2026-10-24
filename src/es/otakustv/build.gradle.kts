@@ -17,6 +17,7 @@ dependencies {
     implementation(project(":lib:uqloadextractor"))
     implementation(project(":lib:mp4uploadextractor"))
     implementation(project(":lib:mixdropextractor"))
+    implementation(project(":lib:filemoonextractor"))
     implementation(project(":lib:luluextractor"))
     implementation(project(":lib:universalextractor"))
 }

@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.es.otakustv
 
 import aniyomi.lib.doodextractor.DoodExtractor
+import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.luluextractor.LuluExtractor
 import aniyomi.lib.mixdropextractor.MixDropExtractor
 import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
@@ -51,6 +52,7 @@ class OtakusTV : AnimeHttpSource() {
     private val baseHost = baseUrl.toHttpUrl().host
 
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val voeExtractor by lazy { VoeExtractor(client, headers) }
     private val uqloadExtractor by lazy { UqloadExtractor(client) }
@@ -251,7 +253,10 @@ class OtakusTV : AnimeHttpSource() {
             "uqload" in u -> uqloadExtractor.videosFromUrl(url)
             "mp4upload" in u -> mp4uploadExtractor.videosFromUrl(url, headers)
             "mixdrop" in u -> mixDropExtractor.videosFromUrl(url)
-            listOf("bysesukior", "byse", "streamwish", "strwish", "wish", "filelions", "lion", "swdyu", "iplayerhls").any { it in u } ->
+            // Filemoon runs on rotating "byse…" hosts, so "byse" also covers "bysesukior".
+            listOf("filemoon", "byse").any { it in u } ->
+                filemoonExtractor.videosFromUrl(url)
+            listOf("streamwish", "strwish", "wish", "filelions", "lion", "swdyu", "iplayerhls").any { it in u } ->
                 streamwishExtractor.videosFromUrl(url, "StreamWish")
             else -> universalExtractor.videosFromUrl(url, headers)
         }
