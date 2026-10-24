@@ -1,11 +1,19 @@
+import gzip
 import html
 import sys
 import json
 from pathlib import Path
+import re
 import shutil
+
+from google.protobuf import json_format
+
+import index_pb2
 
 REMOTE_REPO: Path = Path.cwd()
 LOCAL_REPO: Path = REMOTE_REPO.parent.joinpath(sys.argv[2])
+
+LANGUAGE_REGEX = re.compile(r"aniyomi-([^.]+)")
 
 to_delete: list[str] = json.loads(sys.argv[1])
 
@@ -19,36 +27,98 @@ for module in to_delete:
         print(file.name)
         file.unlink(missing_ok=True)
 
-shutil.copytree(src=LOCAL_REPO.joinpath("apk"), dst=REMOTE_REPO.joinpath("apk"), dirs_exist_ok = True)
-shutil.copytree(src=LOCAL_REPO.joinpath("icon"), dst=REMOTE_REPO.joinpath("icon"), dirs_exist_ok = True)
+shutil.copytree(
+    src=LOCAL_REPO.joinpath("apk"), dst=REMOTE_REPO.joinpath("apk"), dirs_exist_ok=True
+)
+shutil.copytree(
+    src=LOCAL_REPO.joinpath("icon"),
+    dst=REMOTE_REPO.joinpath("icon"),
+    dirs_exist_ok=True,
+)
 
-with REMOTE_REPO.joinpath("index.json").open() as remote_index_file:
-    remote_index = json.load(remote_index_file)
+with REMOTE_REPO.joinpath("index.json").open() as f:
+    remote_proto = json_format.Parse(f.read(), index_pb2.Index())
 
-with LOCAL_REPO.joinpath("index.min.json").open() as local_index_file:
-    local_index = json.load(local_index_file)
+with LOCAL_REPO.joinpath("index.json").open() as f:
+    local_proto = json_format.Parse(f.read(), index_pb2.ExtensionList())
 
-index = [
-    item for item in remote_index
-    if not any(item["pkg"].endswith(f".{module}") for module in to_delete)
+all_extensions = [
+    ext
+    for ext in remote_proto.extensionList.extensions
+    if not any(ext.packageName.endswith(f".{module}") for module in to_delete)
 ]
-index.extend(local_index)
-index.sort(key=lambda x: x["pkg"])
+all_extensions.extend(local_proto.extensions)
+all_extensions.sort(key=lambda ext: ext.packageName)
 
-with REMOTE_REPO.joinpath("index.json").open("w", encoding="utf-8") as index_file:
-    json.dump(index, index_file, ensure_ascii=False, indent=2)
+index = index_pb2.Index(
+    name="Yūzōnō",
+    badgeLabel="Yū",
+    signingKey="cbec121aa82ebb02aaa73806992e0368a97d47b5451ed6524816d03084c45905",
+    contact=index_pb2.Contact(
+        website="https://yuzono.github.io", discord="https://discord.gg/85MZhUX688"
+    ),
+    extensionList=index_pb2.ExtensionList(extensions=all_extensions),
+)
 
-for item in index:
-    for source in item["sources"]:
-        source.pop("versionId", None)
+with REMOTE_REPO.joinpath("index.json").open("w", encoding="utf-8") as f:
+    f.write(
+        json_format.MessageToJson(
+            index,
+            always_print_fields_with_no_presence=False,
+            preserving_proto_field_name=True,
+        )
+    )
 
-with REMOTE_REPO.joinpath("index.min.json").open("w", encoding="utf-8") as index_min_file:
-    json.dump(index, index_min_file, ensure_ascii=False, separators=(",", ":"))
+with REMOTE_REPO.joinpath("index.pb").open("wb") as f:
+    f.write(gzip.compress(index.SerializeToString(deterministic=True), mtime=0))
 
-with REMOTE_REPO.joinpath("index.html").open("w", encoding="utf-8") as index_html_file:
-    index_html_file.write('<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n<title>apks</title>\n</head>\n<body>\n<pre>\n')
-    for entry in index:
-        apk_escaped = 'apk/' + html.escape(entry["apk"])
-        name_escaped = html.escape(entry["name"])
-        index_html_file.write(f'<a href="{apk_escaped}">{name_escaped}</a>\n')
-    index_html_file.write('</pre>\n</body>\n</html>\n')
+
+def get_legacy_lang(ext) -> str:
+    apk_filename = ext.resources.apkUrl.split("/")[-1]
+    lang = LANGUAGE_REGEX.search(apk_filename).group(1)
+    if len(ext.sources) == 1:
+        source_language = ext.sources[0].language
+        if (
+            source_language != lang
+            and source_language not in {"all", "other"}
+            and lang not in {"all", "other"}
+        ):
+            lang = source_language
+    return lang
+
+
+legacy_json_index = [
+    {
+        "name": f"Aniyomi: {ext.name}",
+        "pkg": ext.packageName,
+        "apk": ext.resources.apkUrl.split("/")[-1],
+        "lang": get_legacy_lang(ext),
+        "code": ext.versionCode,
+        "version": ext.versionName,
+        "nsfw": 1 if ext.contentWarning > 1 else 0,
+        "torrent": 1 if ext.isTorrent else 0,
+        "sources": [
+            {
+                "name": source.name,
+                "lang": source.language,
+                "id": str(source.id),
+                "baseUrl": source.homeUrl,
+            }
+            for source in ext.sources
+        ],
+    }
+    for ext in all_extensions
+]
+
+with REMOTE_REPO.joinpath("index.min.json").open("w", encoding="utf-8") as f:
+    json.dump(legacy_json_index, f, ensure_ascii=False, separators=(",", ":"))
+
+with REMOTE_REPO.joinpath("index.html").open("w", encoding="utf-8") as f:
+    f.write(
+        '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n<title>apks</title>\n</head>\n<body>\n<pre>\n'
+    )
+    for ext in all_extensions:
+        apk_escaped = html.escape(ext.resources.apkUrl)
+        name_escaped = html.escape(f"Aniyomi: {ext.name}")
+        f.write(f'<a href="{apk_escaped}">{name_escaped}</a>\n')
+    f.write("</pre>\n</body>\n</html>\n")

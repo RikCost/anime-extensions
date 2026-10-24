@@ -1,10 +1,12 @@
-import keiyoushi.gradle.extensions.baseVersionCode
-
 plugins {
     alias(kei.plugins.multisrc)
 }
 
-baseVersionCode = 8
 dependencies {
     implementation(project(":lib:playlistutils"))
+}
+
+yuzono {
+    baseVersionCode = 9
+    libVersion = "16"
 }

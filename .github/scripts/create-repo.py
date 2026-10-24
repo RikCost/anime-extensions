@@ -1,17 +1,34 @@
 import json
 import os
 import re
+import struct
 import subprocess
 from pathlib import Path
 from zipfile import ZipFile
 
+
+def hex_to_float(hex_str):
+    int_val = int(hex_str, 16)
+    float_val = struct.unpack(">f", struct.pack(">I", int_val))[0]
+    return round(float_val, 1)
+
+
+# aapt prints an integer meta-data value ("14") in decimal and a float one ("1.4") as its raw hex bits
+def parse_extension_lib(value):
+    return str(hex_to_float(value)) if value.startswith("0x") else value
+
+
 PACKAGE_NAME_REGEX = re.compile(r"package: name='([^']+)'")
 VERSION_CODE_REGEX = re.compile(r"versionCode='([^']+)'")
 VERSION_NAME_REGEX = re.compile(r"versionName='([^']+)'")
-IS_NSFW_REGEX = re.compile(r"'tachiyomi.animeextension.nsfw' value='([^']+)'")
-APPLICATION_LABEL_REGEX = re.compile(r"^application-label:'([^']+)'", re.MULTILINE)
-APPLICATION_ICON_320_REGEX = re.compile(r"^application-icon-320:'([^']+)'", re.MULTILINE)
-LANGUAGE_REGEX = re.compile(r"aniyomi-([^.]+)")
+CONTENT_WARNING_REGEX = re.compile(r"'tachiyomix.contentWarning' value='([^']+)'")
+EXTENSION_LIB_REGEX = re.compile(r"'tachiyomix.extensionLib' value='([^']+)'")
+TORRENT_REGEX = re.compile(r"'tachiyomi.animeextension.torrent' value='([^']+)'")
+# aapt doesn't escape a ' inside a value ("Samato's Den: Videos"), so the name runs to the end of its line
+EXTENSION_NAME_REGEX = re.compile(r"'tachiyomix.name' value='(.*)'$", re.MULTILINE)
+APPLICATION_ICON_320_REGEX = re.compile(
+    r"^application-icon-320:'([^']+)'", re.MULTILINE
+)
 
 *_, ANDROID_BUILD_TOOLS = (Path(os.environ["ANDROID_HOME"]) / "build-tools").iterdir()
 REPO_DIR = Path("repo")
@@ -20,10 +37,17 @@ REPO_ICON_DIR = REPO_DIR / "icon"
 
 REPO_ICON_DIR.mkdir(parents=True, exist_ok=True)
 
+APK_BASE_URL = (
+    "https://raw.githubusercontent.com/yuzono/anime-repo/refs/heads/repo/apk"
+)
+ICON_BASE_URL = (
+    "https://raw.githubusercontent.com/yuzono/anime-repo/refs/heads/repo/icon"
+)
+
 with open("output.json", encoding="utf-8") as f:
     inspector_data = json.load(f)
 
-index_min_data = []
+extensions = []
 
 for apk in REPO_APK_DIR.iterdir():
     badging = subprocess.check_output(
@@ -40,50 +64,43 @@ for apk in REPO_APK_DIR.iterdir():
     package_name = PACKAGE_NAME_REGEX.search(package_info)[1]
     application_icon = APPLICATION_ICON_320_REGEX.search(badging)[1]
 
-    with ZipFile(apk) as z, z.open(application_icon) as i, (
-        REPO_ICON_DIR / f"{package_name}.png"
-    ).open("wb") as f:
+    with (
+        ZipFile(apk) as z,
+        z.open(application_icon) as i,
+        (REPO_ICON_DIR / f"{package_name}.png").open("wb") as f,
+    ):
         f.write(i.read())
 
-    language = LANGUAGE_REGEX.search(apk.name)[1]
     sources = inspector_data[package_name]
+    content_warning = int(CONTENT_WARNING_REGEX.search(badging).group(1))
+    extension_lib = parse_extension_lib(EXTENSION_LIB_REGEX.search(badging).group(1).strip())
+    torrent = int(TORRENT_REGEX.search(badging).group(1))
+    ext_name = EXTENSION_NAME_REGEX.search(badging).group(1)
 
-    if len(sources) == 1:
-        source_language = sources[0]["lang"]
+    extensions.append(
+        {
+            "name": ext_name,
+            "packageName": package_name,
+            "resources": {
+                "apkUrl": f"{APK_BASE_URL}/{apk.name}",
+                "iconUrl": f"{ICON_BASE_URL}/{package_name}.png",
+            },
+            "extensionLib": str(extension_lib),
+            "versionCode": int(VERSION_CODE_REGEX.search(package_info).group(1)),
+            "versionName": VERSION_NAME_REGEX.search(package_info).group(1),
+            "contentWarning": content_warning + 1,
+            "isTorrent": torrent == 1,
+            "sources": [
+                {
+                    "id": int(source["id"]),
+                    "name": source["name"],
+                    "language": source["lang"],
+                    "homeUrl": source["baseUrl"],
+                }
+                for source in sources
+            ],
+        }
+    )
 
-        if (
-            source_language != language
-            and source_language not in {"all", "other"}
-            and language not in {"all", "other"}
-        ):
-            language = source_language
-
-    common_data = {
-        "name": APPLICATION_LABEL_REGEX.search(badging)[1],
-        "pkg": package_name,
-        "apk": apk.name,
-        "lang": language,
-        "code": int(VERSION_CODE_REGEX.search(package_info)[1]),
-        "version": VERSION_NAME_REGEX.search(package_info)[1],
-        "nsfw": int(IS_NSFW_REGEX.search(badging)[1]),
-    }
-    min_data = {
-        **common_data,
-        "sources": [],
-    }
-
-    for source in sources:
-        min_data["sources"].append(
-            {
-                "name": source["name"],
-                "lang": source["lang"],
-                "id": source["id"],
-                "baseUrl": source["baseUrl"],
-                "versionId": source["versionId"],
-            }
-        )
-
-    index_min_data.append(min_data)
-
-with REPO_DIR.joinpath("index.min.json").open("w", encoding="utf-8") as index_file:
-    json.dump(index_min_data, index_file, ensure_ascii=False, separators=(",", ":"))
+with REPO_DIR.joinpath("index.json").open("w", encoding="utf-8") as f:
+    json.dump({"extensions": extensions}, f, ensure_ascii=False, separators=(",", ":"))
