@@ -15,10 +15,12 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.POST
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toHex
 import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
@@ -31,19 +33,14 @@ import okhttp3.RequestBody
 import okhttp3.Response
 import java.security.MessageDigest
 
-class FunAnimeTV :
+@Source
+abstract class FunAnimeTV :
     AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
-
-    override val name = "Fun Anime TV"
-
-    override val baseUrl = "https://betterclass.click"
 
     val apiUrl by lazy {
         "$baseUrl/api.php"
     }
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -334,7 +331,7 @@ class FunAnimeTV :
     fun md5(input: String): String {
         val md = MessageDigest.getInstance("MD5")
         val digest = md.digest(input.toByteArray(Charsets.UTF_8))
-        return digest.joinToString(separator = "") { "%02x".format(it) }
+        return digest.toHex()
     }
 
     private fun createRequestJson(

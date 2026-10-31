@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
@@ -24,6 +25,7 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelFlatMap
 import keiyoushi.utils.parallelMapNotNull
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toHex
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.CancellationException
@@ -41,19 +43,15 @@ import java.util.Locale
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-class HexaWatch :
+@Source
+abstract class HexaWatch :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
 
-    override val name = "HexaWatch"
-
-    override val baseUrl = "https://hexa.su"
     private val animeUrl = "$baseUrl/details"
     private val apiUrl = "https://theemoviedb.hexa.su/api/tmdb"
     private val subtitleUrl = "https://sub.wyzie.ru"
     private val decryptionApiUrl = "https://enc-dec.app/api/dec-hexa"
-
-    override val lang = "en"
 
     override val supportsLatest = true
 
@@ -61,7 +59,7 @@ class HexaWatch :
 
     private val playlistUtils by lazy { PlaylistUtils(client, headers) }
 
-    private val capTokenProvider by lazy { CapTokenProvider() }
+    private val capTokenProvider by lazy { CapTokenProvider("$baseUrl/") }
 
     // ============================== Popular ===============================
     override fun popularAnimeRequest(page: Int): Request {
@@ -516,7 +514,7 @@ class HexaWatch :
     private class HosterData(val requestUrl: String, val server: String, val key: String, val url: String?)
 
     private fun randomHex(bytes: Int) = ByteArray(bytes).also(SECURE_RANDOM::nextBytes)
-        .joinToString("") { "%02x".format(it) }
+        .toHex()
 
     // Stands in for the site's hashed screen/UA/canvas fingerprint; only needs to be stable.
     private val clientFingerprint by lazy { randomHex(4).toLong(16).toString(36) }

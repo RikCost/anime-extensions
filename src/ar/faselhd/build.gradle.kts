@@ -1,0 +1,23 @@
+plugins {
+    alias(kei.plugins.extension)
+}
+
+yuzono {
+    name = "FASELHD"
+    versionCode = 31
+    contentWarning = ContentWarning.SAFE
+    libVersion = "14"
+
+    source {
+        name = "فاصل اعلاني"
+        lang = "ar"
+        baseUrl {
+            custom("https://www.faselhds.biz")
+        }
+    }
+}
+
+dependencies {
+    implementation(project(":lib:playlistutils"))
+    implementation(project(":lib:synchrony"))
+}
