@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.addListPreference
@@ -41,32 +42,14 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 
-class RuTracker :
+@Source
+abstract class RuTracker :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "RuTracker"
-
-    override val lang = "ru"
 
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
-
-    // Read on every access, so a mirror switch applies without a restart. Login cookies are bound
-    // to the host, so a switch also allows an immediate new login.
-    override val baseUrl: String
-        get() {
-            val domain = preferences.getString(PREF_DOMAIN_KEY, null).orEmpty().ifBlank { DOMAINS.first() }
-            if (domain != currentDomain) {
-                currentDomain = domain
-                lastLoginFailure = 0L
-            }
-            return domain
-        }
-
-    @Volatile
-    private var currentDomain: String? = null
 
     private val forumUrl: String
         get() = "$baseUrl/forum"
@@ -99,11 +82,14 @@ class RuTracker :
 
     private val loginLock = Any()
 
-    // Time of the last rejected login: don't retry it on every response, but recover after a while.
+    // Host and time of the last rejected login: don't retry it on every response, but recover after
+    // a while. Login cookies are bound to the host, so another mirror may log in at once.
     @Volatile
-    private var lastLoginFailure: Long = 0L
+    private var lastLoginFailure: Pair<String, Long>? = null
 
-    private fun loginTemporarilyBlocked(): Boolean = System.currentTimeMillis() - lastLoginFailure < LOGIN_RETRY_INTERVAL_MS
+    private fun loginTemporarilyBlocked(host: String): Boolean = lastLoginFailure?.let { (failedHost, time) ->
+        failedHost == host && System.currentTimeMillis() - time < LOGIN_RETRY_INTERVAL_MS
+    } ?: false
 
     private fun authInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -112,7 +98,8 @@ class RuTracker :
         val contentType = response.header("Content-Type").orEmpty()
         if (!contentType.contains("text/html", ignoreCase = true)) return response
 
-        if (loginTemporarilyBlocked()) return response
+        val host = request.url.host
+        if (host != baseUrl.toHttpUrl().host || loginTemporarilyBlocked(host)) return response
 
         val username = preferences.getString(PREF_USERNAME_KEY, "").orEmpty()
         val password = preferences.getString(PREF_PASSWORD_KEY, "").orEmpty()
@@ -122,28 +109,29 @@ class RuTracker :
         if (peek.contains(LOGGED_IN_MARKER)) return response
 
         synchronized(loginLock) {
-            if (!loginTemporarilyBlocked()) login(username, password)
+            if (!loginTemporarilyBlocked(host)) login(request.url.scheme, host, username, password)
         }
         response.close()
         val retry = chain.proceed(request)
 
         val retryPeek = runCatching { retry.peekBody(PEEK_SIZE).string() }.getOrDefault("")
-        if (!retryPeek.contains(LOGGED_IN_MARKER)) lastLoginFailure = System.currentTimeMillis()
+        if (!retryPeek.contains(LOGGED_IN_MARKER)) lastLoginFailure = host to System.currentTimeMillis()
         return retry
     }
 
-    // Sent with network.client (no auth interceptor, so no recursion). It shares the cookie jar,
-    // so bb_session reaches every other request.
-    private fun login(username: String, password: String) {
+    // Sent with network.client (no auth interceptor, so no recursion), to the host of the request
+    // that needed it. It shares the cookie jar, so bb_session reaches every other request.
+    private fun login(scheme: String, host: String, username: String, password: String) {
         val body = FormBody.Builder()
             .add("login_username", username)
             .add("login_password", password)
             .add("login", "вход")
             .add("redirect", "index.php")
             .build()
-        val loginHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
+        val origin = "$scheme://$host"
+        val loginHeaders = headers.newBuilder().set("Referer", "$origin/").build()
         runCatching {
-            network.client.newCall(POST("$forumUrl/login.php", loginHeaders, body)).execute().close()
+            network.client.newCall(POST("$origin/forum/login.php", loginHeaders, body)).execute().close()
         }
     }
 
@@ -541,15 +529,6 @@ class RuTracker :
     // ============================ Preferences =============================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        screen.addListPreference(
-            key = PREF_DOMAIN_KEY,
-            default = DOMAINS.first(),
-            title = "Зеркало / Domain",
-            summary = "%s\nПри смене зеркала нужно заново войти в аккаунт.",
-            entries = DOMAINS,
-            entryValues = DOMAINS,
-        )
-
         screen.addSwitchPreference(
             key = PREF_GRID_COVERS_KEY,
             default = PREF_GRID_COVERS_DEFAULT,
@@ -669,11 +648,6 @@ class RuTracker :
     }
 
     companion object {
-        private val DOMAINS = listOf(
-            "https://rutracker.org",
-            "https://rutracker.net",
-        )
-
         // Only when the WebView can't report its UA (it throws while the provider updates).
         private const val FALLBACK_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -716,7 +690,6 @@ class RuTracker :
         private const val LOGGED_IN_MARKER = "logged-in-username"
         private const val LOGIN_RETRY_INTERVAL_MS = 60_000L
 
-        private const val PREF_DOMAIN_KEY = "domain"
         private const val PREF_USERNAME_KEY = "username"
         private const val PREF_PASSWORD_KEY = "password"
         private const val PREF_GRID_COVERS_KEY = "grid_covers"
