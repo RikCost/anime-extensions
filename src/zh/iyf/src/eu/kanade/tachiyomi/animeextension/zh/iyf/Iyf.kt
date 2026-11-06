@@ -8,8 +8,10 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toHex
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonArray
@@ -26,13 +28,8 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class Iyf : AnimeHttpLegacySource() {
-    override val baseUrl: String
-        get() = "https://www.iyf.tv"
-    override val lang: String
-        get() = "zh"
-    override val name: String
-        get() = "爱壹帆"
+@Source
+abstract class Iyf : AnimeHttpLegacySource() {
     override val supportsLatest: Boolean
         get() = true
 
@@ -237,7 +234,7 @@ class Iyf : AnimeHttpLegacySource() {
     private fun signature(query: String, pConfig: PConfig): String {
         val s = "${pConfig.publicKey}&${query.lowercase()}&${pConfig.privateKey}"
         return MessageDigest.getInstance("MD5").digest(s.toByteArray())
-            .joinToString(separator = "") { "%02x".format(it) }
+            .toHex()
     }
 
     override fun getFilterList(): AnimeFilterList = AnimeFilterList(

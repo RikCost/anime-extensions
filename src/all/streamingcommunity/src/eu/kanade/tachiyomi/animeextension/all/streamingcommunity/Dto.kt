@@ -4,6 +4,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import keiyoushi.lib.i18n.Intl
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.math.roundToInt
 
 @Suppress("PropertyName")
@@ -17,7 +18,7 @@ data class BrowseResponse(
         val titles: List<TitleObject> = emptyList(),
         val totalCount: Int? = null,
         val scws_url: String? = null, // https://vixcloud.co
-        val cdn_url: String? = null, // https://cdn.streamingunity.vip
+        val cdn_url: String? = null, // https://cdn.streamingunity.fun
     )
 }
 
@@ -209,4 +210,13 @@ data class SingleShowResponse(
             )
         }
     }
+}
+
+@Serializable
+class StreamServer(
+    val url: String,
+    private val active: JsonPrimitive? = null,
+) {
+    // `active` is not always a keyword - live pages emit the number 1 for the selected mirror.
+    val isActive get() = active?.content == "true" || active?.content == "1"
 }
